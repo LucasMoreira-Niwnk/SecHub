@@ -4,6 +4,8 @@ Ao cadastrar um domínio, a opção **Descobrir subdomínios em certificados pú
 
 O resultado fica agrupado em **Domínios**, com o domínio principal e os subdomínios abaixo dele. Nomes cadastrados manualmente também são agrupados automaticamente pelo ancestral mais próximo. Um nome como `notexample.com` não é filho de `example.com`.
 
+Na aba **Achados**, cada domínio ou subdomínio tem seu próprio bloco expansível, com contagem por severidade, total de observações e data da última varredura concluída. Os grupos são ordenados pela maior severidade, e as evidências e orientações ficam dentro do host correspondente. O estado aberto/fechado dos grupos é preservado durante a navegação na sessão da página.
+
 ## Status por host
 
 - **DNS público:** A/AAAA retornou apenas endereços públicos.
