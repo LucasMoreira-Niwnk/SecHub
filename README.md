@@ -22,7 +22,7 @@ Para abrir diretamente a prévia local no PowerShell: `./run-local.ps1`. Na vali
 - DNS A/AAAA, MX, NS, TXT, SPF e DMARC. Avaliações de email são por hostname; confirmar política herdada e função de envio antes de tratar um achado como problema.
 - Certificado TLS, expiração, protocolo negociado (mínimo TLS 1.2), status HTTP, headers HSTS/CSP/nosniff, proteção contra enquadramento e cookies Secure.
 - Evidência e orientação por observação. Não armazena valores de cookies, assertions SAML ou respostas HTML dos alvos.
-- Google Workspace via aplicação SAML: assinaturas da resposta e assertion, audiência, emissor, Recipient, validade, correlação InResponseTo, vínculo ao navegador e lista explícita de emails.
+- Google Workspace via aplicação SAML: assinatura obrigatória da resposta completa (incluindo a assertion), audiência, emissor, Recipient, validade, correlação InResponseTo, vínculo ao navegador e lista explícita de emails. Assinatura separada da assertion é opcional.
 - Sessões opacas de 8h, hash do identificador no banco, proteção CSRF, validação de Host, headers de segurança e auditoria das alterações.
 - Exportação de plano ZAP baseline passivo por domínio. Não executa Docker ou ZAP automaticamente.
 

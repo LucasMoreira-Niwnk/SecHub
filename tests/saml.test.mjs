@@ -28,7 +28,8 @@ function response(requestId,options={}) {
   const before=new Date(Date.now()-60000).toISOString();
   const after=options.expired?new Date(Date.now()-180000).toISOString():new Date(Date.now()+300000).toISOString();
   const xml=`<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_${randomUUID()}" Version="2.0" IssueInstant="${instant}" Destination="${acs}" InResponseTo="${requestId}"><saml:Issuer>${idpIssuer}</saml:Issuer><samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status><saml:Assertion ID="_${randomUUID()}" Version="2.0" IssueInstant="${instant}"><saml:Issuer>${options.issuer||idpIssuer}</saml:Issuer><saml:Subject><saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">${options.email||email}</saml:NameID><saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><saml:SubjectConfirmationData InResponseTo="${requestId}" Recipient="${options.recipient||acs}" NotOnOrAfter="${after}"/></saml:SubjectConfirmation></saml:Subject><saml:Conditions NotBefore="${before}" NotOnOrAfter="${after}"><saml:AudienceRestriction><saml:Audience>${options.audience||entityId}</saml:Audience></saml:AudienceRestriction></saml:Conditions><saml:AuthnStatement AuthnInstant="${instant}" SessionIndex="test-session"><saml:AuthnContext><saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement></saml:Assertion></samlp:Response>`;
-  const signedAssertion=signXml(xml,'Assertion',options.key);
+  if(options.unsigned) return xml;
+  const signedAssertion=options.responseOnly?xml:signXml(xml,'Assertion',options.key);
   return options.assertionOnly?signedAssertion:signXml(signedAssertion,'Response',options.key);
 }
 
@@ -43,7 +44,9 @@ test('SAML assinado: autentica, rejeita replay, adulteração, IdP/audiência/de
     await assert.rejects(saml.complete(fields,'other-browser'),{samlCode:'SAML_BROWSER_STATE'});
     assert.equal(await saml.complete(fields,valid.relay),email);
     await assert.rejects(saml.complete(fields,valid.relay),{samlCode:'SAML_FLOW_EXPIRED'});
-    for(const [options,expectedCode] of [[{issuer:'evil-idp'},'SAML_ISSUER'],[{audience:'wrong-app'},'SAML_AUDIENCE'],[{recipient:'https://evil.example/acs'},'SAML_RECIPIENT'],[{email:'admin@evil.example'},'SAML_EMAIL_DOMAIN'],[{email:'unlisted@casaeterra.com'},'SAML_EMAIL_NOT_ALLOWED'],[{expired:true},'SAML_SUBJECT'],[{assertionOnly:true},'SAML_SIGNATURE'],[{tampered:true},'SAML_SIGNATURE'],[{key:generateKeyPairSync('rsa',{modulusLength:2048}).privateKey},'SAML_SIGNATURE']]) {
+    const responseOnly=await begin();
+    assert.equal(await saml.complete({RelayState:responseOnly.relay,SAMLResponse:Buffer.from(response(responseOnly.requestId,{responseOnly:true})).toString('base64')},responseOnly.relay),email);
+    for(const [options,expectedCode] of [[{issuer:'evil-idp'},'SAML_ISSUER'],[{audience:'wrong-app'},'SAML_AUDIENCE'],[{recipient:'https://evil.example/acs'},'SAML_RECIPIENT'],[{email:'admin@evil.example'},'SAML_EMAIL_DOMAIN'],[{email:'unlisted@casaeterra.com'},'SAML_EMAIL_NOT_ALLOWED'],[{expired:true},'SAML_SUBJECT'],[{assertionOnly:true},'SAML_RESPONSE_SIGNATURE'],[{unsigned:true},'SAML_RESPONSE_SIGNATURE'],[{tampered:true},'SAML_RESPONSE_SIGNATURE'],[{responseOnly:true,tampered:true},'SAML_RESPONSE_SIGNATURE'],[{key:generateKeyPairSync('rsa',{modulusLength:2048}).privateKey},'SAML_RESPONSE_SIGNATURE']]) {
       const flow=await begin();let xml=response(flow.requestId,options);
       if(options.tampered)xml=xml.replace('admin@casaeterra.com','evil@casaeterra.com');
       await assert.rejects(saml.complete({RelayState:flow.relay,SAMLResponse:Buffer.from(xml).toString('base64')},flow.relay),error=>samlDiagnostic(error).code===expectedCode,expectedCode);
@@ -55,7 +58,8 @@ test('SAML assinado: autentica, rejeita replay, adulteração, IdP/audiência/de
 
 test('diagnóstico SAML não expõe conteúdo bruto, assertion ou identidade',()=>{
   const secret='PRIVATE_ASSERTION_CONTENT';
-  assert.equal(samlDiagnostic(new Error('Invalid document signature '+secret)).code,'SAML_SIGNATURE');
+  assert.equal(samlDiagnostic(new Error('Invalid document signature '+secret)).code,'SAML_RESPONSE_SIGNATURE');
+  assert.equal(samlDiagnostic(new Error('Invalid signature')).code,'SAML_ASSERTION_SIGNATURE');
   assert.equal(samlDiagnostic(new Error('InResponseTo is not valid '+secret)).code,'SAML_CORRELATION');
   for(const error of [new Error(secret),new Error('Audience mismatch '+secret),{samlCode:'UNTRUSTED_'+secret,message:secret}]) {
     assert.ok(!JSON.stringify(samlDiagnostic(error)).includes(secret));

@@ -133,7 +133,7 @@ sudo systemctl restart sechub
 sudo journalctl -u sechub -n 50 --no-pager
 ```
 
-Abra https://sechub.casaeterra.com e inicie o login pelo botão do SecHUB. Verifique a entrada de um administrador permitido e a rejeição de uma conta fora da lista. A aplicação exige resposta e assertion assinadas, correlação com solicitação iniciada no mesmo navegador e NameID no formato EMAIL.
+Abra https://sechub.casaeterra.com e inicie o login pelo botão do SecHUB. Verifique a entrada de um administrador permitido e a rejeição de uma conta fora da lista. A aplicação exige assinatura válida da resposta completa, que cobre a assertion contida nela, correlação com solicitação iniciada no mesmo navegador e NameID no formato EMAIL. Uma assinatura adicional e separada na assertion é opcional. Respostas sem assinatura ou assinadas por outra chave continuam rejeitadas.
 
 Login iniciado diretamente pelo IdP, pelo launcher Google ou pelo botão de teste do Admin Console não é aceito nesta implementação. Não desabilite InResponseTo para contornar essa restrição. Logout encerra apenas a sessão SecHUB. Relógio do servidor deve estar sincronizado; tolerância de 60s, janela de login de 10 minutos.
 
@@ -151,6 +151,8 @@ sudo journalctl -u sechub --since '5 minutes ago' --no-pager
 | SAML_EMAIL_DOMAIN | WORKSPACE_DOMAIN e domínio do email principal |
 | SAML_NAMEID_FORMAT | Formato EMAIL e valor Email principal no Google |
 | SAML_SIGNATURE | Certificado público correto e caixa Resposta assinada marcada |
+| SAML_RESPONSE_SIGNATURE | Assinatura da resposta inteira ausente/inválida; comparar a impressão digital com o certificado selecionado no app Google |
+| SAML_ASSERTION_SIGNATURE | Assinatura da assertion inválida; conferir certificado e versão instalada |
 | SAML_ISSUER | Entity ID do Google em SAML_IDP_ISSUER |
 | SAML_AUDIENCE | Entity ID do SecHUB no Google e em SAML_SP_ENTITY_ID |
 | SAML_RECIPIENT | ACS no Google e origem HTTPS em APP_URL |
