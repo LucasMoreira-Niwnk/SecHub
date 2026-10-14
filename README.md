@@ -17,7 +17,8 @@ Para abrir diretamente a prévia local no PowerShell: `./run-local.ps1`. Na vali
 
 ## Implementado
 
-- Cadastro de até 100 domínios públicos; busca; intervalos de 1 a 168 horas.
+- Inventário de até 500 ativos (domínios e subdomínios), agrupamento por domínio principal, busca e intervalos de 1 a 168 horas.
+- Descoberta opcional de subdomínios em certificados públicos (crt.sh), consulta DNS atual e status individual das varreduras. Veja [uso e atualização](docs/SUBDOMINIOS.md).
 - Execução manual e agendada de baseline DNS e HTTPS, histórico persistente e exportação JSON.
 - DNS A/AAAA, MX, NS, TXT, SPF e DMARC. Avaliações de email são por hostname; confirmar política herdada e função de envio antes de tratar um achado como problema.
 - Certificado TLS, expiração, protocolo negociado (mínimo TLS 1.2), status HTTP, headers HSTS/CSP/nosniff, proteção contra enquadramento e cookies Secure.
@@ -53,11 +54,11 @@ Consulte [o roteiro Ubuntu e SAML](docs/SAML-UBUNTU.md) para comandos e configur
 
 ## Operação e limites
 
-O processo deve permanecer em execução para cumprir a agenda. Instale como serviço no ambiente definitivo; a cada 30s o coletor verifica trabalhos vencidos. Após reinício, jobs em execução são marcados como interrompidos; agendas vencidas são retomadas. Limites: duas verificações simultâneas, um minuto entre execuções manuais do mesmo domínio, timeout HTTPS de 10s por salto e no máximo dois redirecionamentos no mesmo hostname. A resposta final HTTPS é avaliada, sem crawl no baseline nativo.
+O processo deve permanecer em execução para cumprir a agenda. Instale como serviço no ambiente definitivo; a cada 30s o coletor verifica trabalhos vencidos. Após reinício, jobs em execução são marcados como interrompidos; agendas vencidas são retomadas. Fila persistente de varreduras individuais e em grupo. Limites: duas verificações simultâneas, um minuto entre execuções manuais do mesmo domínio, timeout HTTPS de 10s por salto e no máximo dois redirecionamentos no mesmo hostname. A resposta final HTTPS é avaliada, sem crawl no baseline nativo.
 
-Endereços privados/reservados são bloqueados antes da conexão HTTPS; a conexão usa o IP público validado para evitar troca de resolução entre validação e acesso. Redirecionamentos para outro hostname não são seguidos. Não cadastra subdomínios automaticamente nem considera um domínio pai autorização para todos os subdomínios. DNS usa o resolvedor do sistema; não usa DNS público de terceiros configurado pela aplicação.
+Endereços privados/reservados são bloqueados antes da conexão HTTPS; a conexão usa o IP público validado para evitar troca de resolução entre validação e acesso. Redirecionamentos para outro hostname não são seguidos. A descoberta opcional registra até 100 subdomínios exatos encontrados em certificados públicos, com agendamentos pausados. Verificar todos processa somente os hosts já registrados sob o domínio; descobrir nomes não ativa monitoramento automaticamente. DNS usa o resolvedor do sistema; não usa DNS público de terceiros configurado pela aplicação.
 
-Falhas do coletor e ausência de headers são observações para investigação. O painel não calcula porcentagem de conformidade, não garante ausência de vulnerabilidades, não enumera todas as versões TLS e não faz validação completa de SPF/DMARC/DNSSEC. Sem notificações externas, integração SIEM, gestão de falsos positivos ou deduplicação entre execuções nesta versão. O painel mostra até 100 execuções recentes; o SQLite conserva o histórico completo.
+Falhas do coletor e ausência de headers são observações para investigação. O painel não calcula porcentagem de conformidade, não garante ausência de vulnerabilidades, não enumera todas as versões TLS e não faz validação completa de SPF/DMARC/DNSSEC. Sem notificações externas, integração SIEM, gestão de falsos positivos ou deduplicação entre execuções nesta versão. O painel mostra até 100 execuções recentes e conserva o último estado e resultado de cada ativo; o SQLite mantém o histórico completo.
 
 ## SQL injection e abuso de autenticação
 
