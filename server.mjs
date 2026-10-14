@@ -2,10 +2,11 @@ import http from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { openStore } from './lib/store.mjs';
 import { normalizeDomain, parseInterval } from './lib/security.mjs';
-import { token, hash, verifyGoogleJWT } from './lib/auth.mjs';
+import { token, hash } from './lib/auth.mjs';
+import { createSaml } from './lib/saml.mjs';
 import { scanDomain } from './lib/scanner.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -14,14 +15,13 @@ const port = Number(process.env.PORT || 3000);
 const appURL = new URL(process.env.APP_URL || `http://127.0.0.1:${port}`);
 const dev = process.env.DEV_MODE === 'true';
 const domain = normalizeDomain(process.env.WORKSPACE_DOMAIN || 'casaeterra.com');
-const clientId = process.env.GOOGLE_CLIENT_ID;
-const secret = process.env.GOOGLE_CLIENT_SECRET;
 const allowed = (process.env.ALLOWED_EMAILS || '').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
 if (dev && (!['127.0.0.1','localhost','::1'].includes(host) || !['127.0.0.1','localhost','[::1]'].includes(appURL.hostname))) throw new Error('Modo local exige HOST e APP_URL de loopback.');
 if (!dev && appURL.protocol!=='https:' && !['127.0.0.1','localhost'].includes(appURL.hostname)) throw new Error('SSO em servidor exige APP_URL HTTPS.');
-const configured = !!(clientId && secret && allowed.length);
 const secure = appURL.protocol === 'https:';
 const {db,audit} = openStore(resolve(process.env.DATA_DIR || resolve(root,'data')));
+const saml=createSaml({db,appURL,domain,allowed});
+const configured=saml.configured;
 db.prepare('INSERT OR IGNORE INTO domains(id,hostname,created_at) VALUES(?,?,?)').run('initial-domain',domain,new Date().toISOString());
 const running = new Set();
 const json = (res,status,data) => { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(data)); };
@@ -36,9 +36,15 @@ const session = req => {
   return row && allowed.includes(row.email) ? row : null;
 };
 const localCSRF = token();
-async function body(req) {
+async function body(req,form=false) {
   let size=0, chunks=[];
-  for await (const chunk of req) {size+=chunk.length;if(size>16384) throw new Error('Requisição muito grande.');chunks.push(chunk);}
+  for await (const chunk of req) {size+=chunk.length;if(size>(form?262144:16384)) throw new Error('Requisição muito grande.');chunks.push(chunk);}
+  if(form) {
+    if(!req.headers['content-type']?.startsWith('application/x-www-form-urlencoded')) throw new Error('Requisição SAML deve usar formulário.');
+    const params=new URLSearchParams(Buffer.concat(chunks).toString());
+    for(const key of ['SAMLResponse','RelayState']) if(params.getAll(key).length!==1) throw new Error('Requisição SAML inválida.');
+    return Object.fromEntries(params);
+  }
   try {return JSON.parse(Buffer.concat(chunks).toString()||'{}');} catch {throw new Error('JSON inválido.');}
 }
 async function runScan(asset,actor) {
@@ -80,31 +86,32 @@ const server = http.createServer(async(req,res)=>{
     const url = new URL(req.url,appURL);
     if(req.method==='GET' && url.pathname==='/health') return json(res,200,{status:'ok'});
     if(req.method==='GET' && url.pathname==='/api/session') return json(res,200,{user:session(req),dev,configured,workspaceDomain:domain});
-    if(req.method==='GET' && url.pathname==='/auth/google') {
-      if(dev) return redirect(res,'/');
-      if(!configured) return json(res,503,{error:'Configure GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET e ALLOWED_EMAILS no servidor.'});
-      const state=token(),nonce=token(),verifier=token();
-      db.prepare('INSERT INTO oauth_states(id,nonce,verifier,expires) VALUES(?,?,?,?)').run(hash(state),nonce,verifier,Date.now()+600000);
-      const auth = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-      const params = {client_id:clientId,redirect_uri:appURL.origin+'/auth/callback',response_type:'code',scope:'openid email profile',state,nonce,hd:domain,code_challenge:createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256'};
-      for(const [k,v] of Object.entries(params)) auth.searchParams.set(k,v);
-      return redirect(res,auth.href,cookie('sechub_oauth',state,600));
+    if(req.method==='GET' && url.pathname==='/auth/saml/metadata') {
+      res.writeHead(200,{'Content-Type':'application/samlmetadata+xml; charset=utf-8'});
+      return res.end(saml.metadata());
     }
-    if(req.method==='GET' && url.pathname==='/auth/callback') {
-      const state=url.searchParams.get('state');
-      if(!state || cookies(req).sechub_oauth!==state) return json(res,403,{error:'Estado OAuth inválido.'});
-      const saved = db.prepare('SELECT * FROM oauth_states WHERE id=? AND expires>?').get(hash(state),Date.now());
-      db.prepare('DELETE FROM oauth_states WHERE id=?').run(hash(state));
-      if(!saved || !url.searchParams.get('code')) return json(res,403,{error:'Login expirado ou cancelado.'});
-      const response=await fetch('https://oauth2.googleapis.com/token',{method:'POST',body:new URLSearchParams({client_id:clientId,client_secret:secret,code:url.searchParams.get('code'),code_verifier:saved.verifier,grant_type:'authorization_code',redirect_uri:appURL.origin+'/auth/callback'}),signal:AbortSignal.timeout(10000)});
-      if(!response.ok) return json(res,403,{error:'Google não confirmou o login.'});
-      const claims=await verifyGoogleJWT((await response.json()).id_token,{clientId,domain,nonce:saved.nonce});
-      const email=claims.email.toLowerCase();
-      if(!allowed.includes(email)) return json(res,403,{error:'Usuário fora da lista de acesso do SecHUB.'});
-      const sid=token();
-      db.prepare('INSERT INTO sessions(id,email,csrf,expires) VALUES(?,?,?,?)').run(hash(sid),email,token(),Date.now()+8*3600000);
-      audit(email,'login','Google Workspace');
-      return redirect(res,'/',cookie('sechub_session',sid,8*3600));
+    if(req.method==='GET' && url.pathname==='/auth/saml/login') {
+      if(dev) return redirect(res,'/');
+      if(!configured) return json(res,503,{error:'SAML pendente. Configure a aplicação no Google Admin Console e os dados do IdP no servidor.'});
+      try {
+        const flow=await saml.begin();
+        return redirect(res,flow.url,'__Host-sechub_saml='+flow.relay+'; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=600');
+      } catch {return json(res,429,{error:'Não foi possível iniciar o login SAML. Tente novamente em instantes.'});}
+    }
+    if(req.method==='POST' && url.pathname==='/auth/saml/acs') {
+      if(!configured) return json(res,503,{error:'SAML ainda não configurado.'});
+      try {
+        const fields=await body(req,true);
+        const email=await saml.complete(fields,cookies(req)['__Host-sechub_saml']);
+        const sid=token();
+        db.prepare('INSERT INTO sessions(id,email,csrf,expires) VALUES(?,?,?,?)').run(hash(sid),email,token(),Date.now()+8*3600000);
+        audit(email,'login','Google Workspace / SAML');
+        res.setHeader('Set-Cookie',[cookie('sechub_session',sid,8*3600),'__Host-sechub_saml=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0']);
+        return redirect(res,'/');
+      } catch {
+        audit('anonymous','saml.rejected','Resposta SAML inválida, expirada ou não autorizada');
+        return json(res,403,{error:'Login SAML não autorizado. Inicie novamente pelo botão de login do SecHUB.'});
+      }
     }
     if(url.pathname.startsWith('/api/')) {
       const user = session(req);
@@ -179,7 +186,8 @@ const scheduler=setInterval(()=>{
     void runScan(asset,'scheduler');
   }
   db.prepare('DELETE FROM sessions WHERE expires<?').run(Date.now());
-  db.prepare('DELETE FROM oauth_states WHERE expires<?').run(Date.now());
+  db.prepare('DELETE FROM saml_flows WHERE expires<?').run(Date.now());
+  db.prepare('DELETE FROM saml_requests WHERE expires<?').run(Date.now());
 },30000);
 server.listen(port,host,()=>console.log(`SecHUB: ${appURL.origin} | ${dev?'MODO LOCAL, sem SSO':configured?'Google Workspace configurado':'SSO pendente: acesso protegido bloqueado'}`));
 function shutdown() {clearInterval(scheduler);server.close(()=>{db.close();process.exit(0);});}

@@ -9,15 +9,20 @@ import http from 'node:http';
 
 async function start(port,dev){
   const dir=mkdtempSync(join(tmpdir(),'sechub-api-'));
-  const proc=spawn(process.execPath,['server.mjs'],{env:{...process.env,PORT:String(port),HOST:'127.0.0.1',APP_URL:`http://127.0.0.1:${port}`,DEV_MODE:String(dev),DATA_DIR:dir,GOOGLE_CLIENT_ID:'',GOOGLE_CLIENT_SECRET:'',ALLOWED_EMAILS:''},stdio:['ignore','pipe','pipe']});
+  const proc=spawn(process.execPath,['server.mjs'],{env:{...process.env,PORT:String(port),HOST:'127.0.0.1',APP_URL:`http://127.0.0.1:${port}`,DEV_MODE:String(dev),DATA_DIR:dir,SAML_ENTRY_POINT:'',SAML_IDP_ISSUER:'',SAML_IDP_CERT_PATH:'',ALLOWED_EMAILS:''},stdio:['ignore','pipe','pipe']});
   await Promise.race([once(proc.stdout,'data'),once(proc,'exit').then(()=>{throw new Error('Servidor não iniciou.');}),new Promise((_,reject)=>{const t=setTimeout(()=>reject(new Error('Timeout')),10000);t.unref();})]);
   return {origin:`http://127.0.0.1:${port}`,stop:async()=>{proc.kill();await once(proc,'exit');rmSync(dir,{recursive:true,force:true});}};
 }
-test('produção: API bloqueada sem SSO, OAuth não simula login e Host é validado',async()=>{
+test('produção: API bloqueada sem SAML, metadados públicos e Host validado',async()=>{
   const server=await start(3197,false);
   try{
     assert.equal((await fetch(server.origin+'/api/overview')).status,401);
-    assert.equal((await fetch(server.origin+'/auth/google')).status,503);
+    assert.equal((await fetch(server.origin+'/auth/saml/login')).status,503);
+    assert.equal((await fetch(server.origin+'/auth/saml/acs',{method:'POST'})).status,503);
+    assert.equal((await fetch(server.origin+'/auth/google')).status,404);
+    const metadata=await(await fetch(server.origin+'/auth/saml/metadata')).text();
+    assert.match(metadata,/AssertionConsumerService/);
+    assert.match(metadata,/auth\/saml\/acs/);
     const response=await fetch(server.origin+'/api/session');
     assert.equal((await response.json()).user,null);
     assert.match(response.headers.get('content-security-policy'),/frame-ancestors 'none'/);

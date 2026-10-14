@@ -1,0 +1,1 @@
+Certificado e chave PRIVADA FICTÍCIOS para testes de assinatura SAML. São públicos e conhecidos, sem acesso a qualquer serviço. Nunca utilizar no servidor ou no Google Workspace. O IdP real deve fornecer seu próprio certificado público.

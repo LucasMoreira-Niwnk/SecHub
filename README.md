@@ -1,10 +1,11 @@
 # Casa & Terra · SecHUB
 
-Primeira versão funcional do monitoramento de domínios empresariais. Node.js 24+, SQLite local e interface em português. Sem dependências npm externas.
+Primeira versão funcional do monitoramento de domínios empresariais. Node.js 24+, SQLite local e interface em português. Autenticação SAML com @node-saml/node-saml; instale as dependências com npm ci.
 
 ## Iniciar
 
 ```powershell
+npm ci
 Copy-Item .env.example .env
 # Para prévia estritamente local, altere DEV_MODE=true no .env.
 node --env-file-if-exists=.env server.mjs
@@ -20,21 +21,35 @@ Para abrir diretamente a prévia local no PowerShell: `./run-local.ps1`. Na vali
 - Execução manual e agendada de baseline DNS e HTTPS, histórico persistente e exportação JSON.
 - DNS A/AAAA, MX, NS, TXT, SPF e DMARC. Avaliações de email são por hostname; confirmar política herdada e função de envio antes de tratar um achado como problema.
 - Certificado TLS, expiração, protocolo negociado (mínimo TLS 1.2), status HTTP, headers HSTS/CSP/nosniff, proteção contra enquadramento e cookies Secure.
-- Evidência e orientação por observação. Não armazena valores de cookies, tokens OAuth ou respostas HTML dos alvos.
-- Google Workspace via OpenID Connect: código de autorização, PKCE, state vinculado ao navegador, nonce, assinatura RS256 com JWKS Google, emissor, audience, validade, email verificado, `hd` e lista explícita de usuários.
+- Evidência e orientação por observação. Não armazena valores de cookies, assertions SAML ou respostas HTML dos alvos.
+- Google Workspace via aplicação SAML: assinaturas da resposta e assertion, audiência, emissor, Recipient, validade, correlação InResponseTo, vínculo ao navegador e lista explícita de emails.
 - Sessões opacas de 8h, hash do identificador no banco, proteção CSRF, validação de Host, headers de segurança e auditoria das alterações.
 - Exportação de plano ZAP baseline passivo por domínio. Não executa Docker ou ZAP automaticamente.
 
-## Habilitar Google Workspace
+## Habilitar Google Workspace por SAML
 
-1. No projeto Google Cloud da empresa, configure a tela de consentimento para uso interno da organização.
-2. Crie um cliente OAuth do tipo Aplicativo da Web.
-3. Cadastre exatamente `https://SEU-HOST/auth/callback` como URI de redirecionamento. Para desenvolvimento local, use `http://127.0.0.1:3000/auth/callback`.
-4. Preencha `.env` no servidor: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `WORKSPACE_DOMAIN=casaeterra.com`, `ALLOWED_EMAILS=administrador@casaeterra.com`. Não coloque segredos no repositório ou no frontend.
-5. Defina `DEV_MODE=false`, `APP_URL` com a origem HTTPS definitiva e `HOST=127.0.0.1` atrás de proxy reverso.
-6. Reinicie o serviço e valide o login com um administrador da lista e a rejeição de uma conta não autorizada.
+A integração é feita no **Google Admin Console**, em Apps > Apps da Web e para dispositivos móveis > Adicionar app > Adicionar app SAML personalizado.
 
-Todos os emails em ALLOWED_EMAILS têm permissão de administrador neste MVP. O login real depende das credenciais e não foi validado com a organização. A aplicação só solicita `openid email profile`, sem acesso a Gmail ou Drive. A autenticação do painel não autentica o scanner nas aplicações alvo.
+É possível subir o site antes de criar a aplicação SAML. Deixe SAML_ENTRY_POINT, SAML_IDP_ISSUER e SAML_IDP_CERT_PATH vazios e DEV_MODE=false: a página de login e os metadados são acessíveis; o painel e a API protegida continuam bloqueados. Não configure GOOGLE_CLIENT_ID ou GOOGLE_CLIENT_SECRET: OAuth/OIDC foi substituído por SAML nesta versão.
+
+Para https://sechub.casaeterra.com:
+
+| Campo no Google | Valor |
+| --- | --- |
+| ACS URL | https://sechub.casaeterra.com/auth/saml/acs |
+| Entity ID do SP | https://sechub.casaeterra.com/auth/saml/metadata |
+| Resposta assinada | Habilitada (obrigatório) |
+| Formato Name ID | EMAIL |
+| Name ID | Informações básicas > Email principal |
+| Start URL | Deixar vazio |
+
+Depois copie a URL de SSO e o Entity ID **do Google**, baixe o certificado público e configure SAML_ENTRY_POINT, SAML_IDP_ISSUER e SAML_IDP_CERT_PATH no servidor. O Entity ID do Google é diferente do Entity ID do SecHUB. O certificado deve estar em PEM, legível pela conta sechub; sua chave privada nunca é necessária.
+
+Autorize a aplicação para o grupo/OU escolhido e configure ALLOWED_EMAILS com os administradores. Reinicie o serviço e teste começando pelo botão de login no SecHUB. Apenas login iniciado pelo SP é aceito; o botão Testar login SAML no Admin Console e o lançamento direto pelo IdP não são suportados. Logout encerra a sessão local, sem encerrar a conta Google.
+
+As sessões anteriores de OAuth são invalidadas na migração. O certificado é validado na inicialização e deve ser renovado antes de vencer. O teste real com o Workspace depende da aplicação criada pelo administrador.
+
+Consulte [o roteiro Ubuntu e SAML](docs/SAML-UBUNTU.md) para comandos e configuração do serviço.
 
 ## Operação e limites
 
@@ -77,13 +92,13 @@ Este MVP pressupõe uma única instância e administradores confiáveis. Antes d
 node --test tests/*.test.mjs
 ```
 
-Testes locais cobrem rejeição de IPs privados, validação de identidade/assinatura Google, CSRF, acesso bloqueado sem SSO, Host, cadastro, duplicação, agenda, persistência e exportação. Não executam scans no domínio empresarial.
+Testes locais cobrem rejeição de IPs privados, validação de respostas e assertions SAML assinadas, CSRF, acesso bloqueado sem SSO, Host, cadastro, duplicação, agenda, persistência e exportação. Não executam scans no domínio empresarial.
 
 ## Referências
 
 - [OWASP Web Security Testing Guide](https://owasp.org/www-project-web-security-testing-guide/)
 - [ZAP Automation Framework](https://www.zaproxy.org/docs/automate/automation-framework/)
-- [Google OpenID Connect](https://developers.google.com/identity/openid-connect/openid-connect)
+- [Google Workspace: aplicação SAML personalizada](https://knowledge.workspace.google.com/admin/apps/set-up-your-own-custom-saml-app)
 - [AWS Security Hub CSPM: standards](https://docs.aws.amazon.com/securityhub/latest/userguide/standards-reference.html)
 
 Paleta extraída dos estilos do [site oficial Casa & Terra](https://casaeterra.com/): azul-marinho `#0d2137`, vermelho `#e53935` e branco. A marca tipográfica do painel é uma composição local, não o arquivo oficial do logotipo.

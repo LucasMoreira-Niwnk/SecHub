@@ -2,3 +2,7 @@
 data/
 coverage/
 *.log
+node_modules/
+.package-store/
+*.pem
+artifacts/saml-update/
