@@ -2,11 +2,14 @@ import http from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { openStore } from './lib/store.mjs';
 import { normalizeDomain, parseInterval } from './lib/security.mjs';
-import { token, hash, verifyGoogleJWT } from './lib/auth.mjs';
-import { scanDomain } from './lib/scanner.mjs';
+import { token, hash } from './lib/auth.mjs';
+import { createSaml, samlDiagnostic } from './lib/saml.mjs';
+import { createMonitor } from './lib/monitor.mjs';
+import { createDiscovery } from './lib/discovery.mjs';
+import { inventory,decodeScan,relinkHierarchy,withinDomain,MAX_ASSETS } from './lib/inventory.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const host = process.env.HOST || '127.0.0.1';
@@ -14,16 +17,18 @@ const port = Number(process.env.PORT || 3000);
 const appURL = new URL(process.env.APP_URL || `http://127.0.0.1:${port}`);
 const dev = process.env.DEV_MODE === 'true';
 const domain = normalizeDomain(process.env.WORKSPACE_DOMAIN || 'casaeterra.com');
-const clientId = process.env.GOOGLE_CLIENT_ID;
-const secret = process.env.GOOGLE_CLIENT_SECRET;
 const allowed = (process.env.ALLOWED_EMAILS || '').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
 if (dev && (!['127.0.0.1','localhost','::1'].includes(host) || !['127.0.0.1','localhost','[::1]'].includes(appURL.hostname))) throw new Error('Modo local exige HOST e APP_URL de loopback.');
 if (!dev && appURL.protocol!=='https:' && !['127.0.0.1','localhost'].includes(appURL.hostname)) throw new Error('SSO em servidor exige APP_URL HTTPS.');
-const configured = !!(clientId && secret && allowed.length);
 const secure = appURL.protocol === 'https:';
 const {db,audit} = openStore(resolve(process.env.DATA_DIR || resolve(root,'data')));
+const saml=createSaml({db,appURL,domain,allowed});
+const configured=saml.configured;
 db.prepare('INSERT OR IGNORE INTO domains(id,hostname,created_at) VALUES(?,?,?)').run('initial-domain',domain,new Date().toISOString());
-const running = new Set();
+relinkHierarchy(db);
+const monitor=createMonitor({db,audit,canRun:()=>dev||configured});
+const discovery=createDiscovery({db,audit});
+const running=monitor.running;
 const json = (res,status,data) => { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(data)); };
 const redirect = (res,path,cookie) => {res.writeHead(302,{Location:path,...(cookie?{'Set-Cookie':cookie}:{})});res.end();};
 const cookie = (name,value,age) => `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${age}${secure?'; Secure':''}`;
@@ -36,36 +41,23 @@ const session = req => {
   return row && allowed.includes(row.email) ? row : null;
 };
 const localCSRF = token();
-async function body(req) {
+async function body(req,form=false) {
   let size=0, chunks=[];
-  for await (const chunk of req) {size+=chunk.length;if(size>16384) throw new Error('Requisição muito grande.');chunks.push(chunk);}
+  for await (const chunk of req) {size+=chunk.length;if(size>(form?262144:16384)) throw new Error('Requisição muito grande.');chunks.push(chunk);}
+  if(form) {
+    if(!req.headers['content-type']?.startsWith('application/x-www-form-urlencoded')) throw new Error('Requisição SAML deve usar formulário.');
+    const params=new URLSearchParams(Buffer.concat(chunks).toString());
+    for(const key of ['SAMLResponse','RelayState']) if(params.getAll(key).length!==1) throw new Error('Requisição SAML inválida.');
+    return Object.fromEntries(params);
+  }
   try {return JSON.parse(Buffer.concat(chunks).toString()||'{}');} catch {throw new Error('JSON inválido.');}
 }
-async function runScan(asset,actor) {
-  if(running.has(asset.id) || running.size>=2) return null;
-  running.add(asset.id);
-  const id = randomUUID();
-  const start = new Date().toISOString();
-  db.prepare('INSERT INTO scans(id,domain_id,status,started_at) VALUES(?,?,?,?)').run(id,asset.id,'running',start);
-  db.prepare('UPDATE domains SET next_run=? WHERE id=?').run(new Date(Date.now()+asset.interval_hours*3600000).toISOString(),asset.id);
-  audit(actor,'scan.started',asset.hostname);
-  // Persist the job before replying; execution stays asynchronous to the HTTP request.
-  void (async()=>{
-    try {
-      const result = await scanDomain(asset.hostname);
-      db.prepare('UPDATE scans SET status=?,finished_at=?,result=? WHERE id=?').run('completed',result.finished,JSON.stringify(result),id);
-      audit(actor,'scan.completed',asset.hostname);
-    } catch(e) {
-      db.prepare('UPDATE scans SET status=?,finished_at=?,result=? WHERE id=?').run('failed',new Date().toISOString(),JSON.stringify({error:String(e.message).slice(0,250)}),id);
-      audit(actor,'scan.failed',asset.hostname);
-    } finally {running.delete(asset.id);}
-  })();
-  return id;
-}
 function getOverview() {
-  const domains = db.prepare('SELECT * FROM domains ORDER BY created_at').all();
-  const scans = db.prepare('SELECT scans.*,domains.hostname FROM scans JOIN domains ON domains.id=scans.domain_id ORDER BY started_at DESC LIMIT 100').all().map(s=>({...s,result:s.result?JSON.parse(s.result):null}));
-  return {domains,scans,audit:db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 50').all(),running:[...running]};
+  const domains = inventory(db);
+  const scans = db.prepare('SELECT scans.*,domains.hostname FROM scans JOIN domains ON domains.id=scans.domain_id ORDER BY started_at DESC LIMIT 100').all().map(decodeScan);
+  return {domains,scans,audit:db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 50').all(),running:[...running],
+    queued:db.prepare("SELECT domain_id FROM scans WHERE status='queued'").all().map(s=>s.domain_id),
+    discoveries:db.prepare('SELECT * FROM discoveries ORDER BY rowid DESC LIMIT 100').all().map(decodeScan)};
 }
 
 const server = http.createServer(async(req,res)=>{
@@ -80,31 +72,34 @@ const server = http.createServer(async(req,res)=>{
     const url = new URL(req.url,appURL);
     if(req.method==='GET' && url.pathname==='/health') return json(res,200,{status:'ok'});
     if(req.method==='GET' && url.pathname==='/api/session') return json(res,200,{user:session(req),dev,configured,workspaceDomain:domain});
-    if(req.method==='GET' && url.pathname==='/auth/google') {
-      if(dev) return redirect(res,'/');
-      if(!configured) return json(res,503,{error:'Configure GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET e ALLOWED_EMAILS no servidor.'});
-      const state=token(),nonce=token(),verifier=token();
-      db.prepare('INSERT INTO oauth_states(id,nonce,verifier,expires) VALUES(?,?,?,?)').run(hash(state),nonce,verifier,Date.now()+600000);
-      const auth = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-      const params = {client_id:clientId,redirect_uri:appURL.origin+'/auth/callback',response_type:'code',scope:'openid email profile',state,nonce,hd:domain,code_challenge:createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256'};
-      for(const [k,v] of Object.entries(params)) auth.searchParams.set(k,v);
-      return redirect(res,auth.href,cookie('sechub_oauth',state,600));
+    if(req.method==='GET' && url.pathname==='/auth/saml/metadata') {
+      res.writeHead(200,{'Content-Type':'application/samlmetadata+xml; charset=utf-8'});
+      return res.end(saml.metadata());
     }
-    if(req.method==='GET' && url.pathname==='/auth/callback') {
-      const state=url.searchParams.get('state');
-      if(!state || cookies(req).sechub_oauth!==state) return json(res,403,{error:'Estado OAuth inválido.'});
-      const saved = db.prepare('SELECT * FROM oauth_states WHERE id=? AND expires>?').get(hash(state),Date.now());
-      db.prepare('DELETE FROM oauth_states WHERE id=?').run(hash(state));
-      if(!saved || !url.searchParams.get('code')) return json(res,403,{error:'Login expirado ou cancelado.'});
-      const response=await fetch('https://oauth2.googleapis.com/token',{method:'POST',body:new URLSearchParams({client_id:clientId,client_secret:secret,code:url.searchParams.get('code'),code_verifier:saved.verifier,grant_type:'authorization_code',redirect_uri:appURL.origin+'/auth/callback'}),signal:AbortSignal.timeout(10000)});
-      if(!response.ok) return json(res,403,{error:'Google não confirmou o login.'});
-      const claims=await verifyGoogleJWT((await response.json()).id_token,{clientId,domain,nonce:saved.nonce});
-      const email=claims.email.toLowerCase();
-      if(!allowed.includes(email)) return json(res,403,{error:'Usuário fora da lista de acesso do SecHUB.'});
-      const sid=token();
-      db.prepare('INSERT INTO sessions(id,email,csrf,expires) VALUES(?,?,?,?)').run(hash(sid),email,token(),Date.now()+8*3600000);
-      audit(email,'login','Google Workspace');
-      return redirect(res,'/',cookie('sechub_session',sid,8*3600));
+    if(req.method==='GET' && url.pathname==='/auth/saml/login') {
+      if(dev) return redirect(res,'/');
+      if(!configured) return json(res,503,{error:'SAML pendente. Configure a aplicação no Google Admin Console e os dados do IdP no servidor.'});
+      try {
+        const flow=await saml.begin();
+        return redirect(res,flow.url,'__Host-sechub_saml='+flow.relay+'; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=600');
+      } catch {return json(res,429,{error:'Não foi possível iniciar o login SAML. Tente novamente em instantes.'});}
+    }
+    if(req.method==='POST' && url.pathname==='/auth/saml/acs') {
+      if(!configured) return json(res,503,{error:'SAML ainda não configurado.'});
+      try {
+        const fields=await body(req,true);
+        const email=await saml.complete(fields,cookies(req)['__Host-sechub_saml']);
+        const sid=token();
+        db.prepare('INSERT INTO sessions(id,email,csrf,expires) VALUES(?,?,?,?)').run(hash(sid),email,token(),Date.now()+8*3600000);
+        audit(email,'login','Google Workspace / SAML');
+        res.setHeader('Set-Cookie',[cookie('sechub_session',sid,8*3600),'__Host-sechub_saml=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0']);
+        return redirect(res,'/');
+      } catch(error) {
+        const diagnostic=samlDiagnostic(error);
+        console.warn('SAML_LOGIN_REJECTED',diagnostic.code);
+        audit('anonymous','saml.rejected',diagnostic.code);
+        return json(res,403,{error:'Login SAML não autorizado.',...diagnostic});
+      }
     }
     if(url.pathname.startsWith('/api/')) {
       const user = session(req);
@@ -125,20 +120,27 @@ const server = http.createServer(async(req,res)=>{
         const hostname=normalizeDomain(data.hostname);
         const interval=parseInterval(data.intervalHours??24);
         if(db.prepare('SELECT id FROM domains WHERE hostname=?').get(hostname)) return json(res,409,{error:'Domínio já cadastrado.'});
-        if(db.prepare('SELECT count(*) AS n FROM domains').get().n>=100) return json(res,400,{error:'Limite de 100 domínios nesta versão.'});
-        db.prepare('INSERT INTO domains(id,hostname,interval_hours,created_at) VALUES(?,?,?,?)').run(randomUUID(),hostname,interval,new Date().toISOString());
+        if(db.prepare('SELECT count(*) AS n FROM domains').get().n>=MAX_ASSETS) return json(res,400,{error:'Limite de 500 ativos nesta versão.'});
+        if(data.discoverSubdomains!==undefined && typeof data.discoverSubdomains!=='boolean') throw new Error('Requisição de descoberta inválida.');
+        const id=randomUUID();
+        db.prepare('INSERT INTO domains(id,hostname,interval_hours,created_at) VALUES(?,?,?,?)').run(id,hostname,interval,new Date().toISOString());
+        relinkHierarchy(db);
         audit(user.email,'domain.created',hostname);
-        return json(res,201,{ok:true});
+        const discoveryJob=data.discoverSubdomains===false?null:discovery.enqueue(db.prepare('SELECT * FROM domains WHERE id=?').get(id),user.email);
+        return json(res,201,{ok:true,id,discovery:discoveryJob});
       }
-      const match=url.pathname.match(/^\/api\/domains\/([^/]+)(?:\/(scan|schedule|zap-plan))?$/);
+      const match=url.pathname.match(/^\/api\/domains\/([^/]+)(?:\/(scan|scan-tree|discover|schedule|zap-plan))?$/);
       if(match) {
         const asset=db.prepare('SELECT * FROM domains WHERE id=?').get(match[1]);
         if(!asset) return json(res,404,{error:'Domínio não encontrado.'});
-        if(req.method==='POST' && match[2]==='scan') {
-          const last=db.prepare('SELECT started_at FROM scans WHERE domain_id=? ORDER BY started_at DESC LIMIT 1').get(asset.id);
-          if(last && Date.now()-Date.parse(last.started_at)<60000) return json(res,429,{error:'Aguarde um minuto entre verificações deste domínio.'});
-          const id=await runScan(asset,user.email);
-          return json(res,id?202:409,id?{id}:{error:'Já existe verificação em andamento ou a fila está ocupada.'});
+        if(req.method==='POST' && ['scan','scan-tree'].includes(match[2])) {
+          const assets=match[2]==='scan-tree'?db.prepare('SELECT * FROM domains ORDER BY hostname').all().filter(d=>d.id===asset.id||withinDomain(d.hostname,asset.hostname)):[asset];
+          const result=monitor.enqueue(assets,user.email);
+          return json(res,result.queued.length?202:409,result.queued.length?result:{error:'Os ativos já estão na fila ou foram verificados no último minuto.',...result});
+        }
+        if(req.method==='POST' && match[2]==='discover') {
+          const result=discovery.enqueue(asset,user.email);
+          return json(res,result.cooldown?429:202,result.cooldown?{error:'Aguarde 10 minutos entre descobertas deste domínio.'}:result);
         }
         if(req.method==='POST' && match[2]==='schedule') {
           const data=await body(req);const interval=parseInterval(data.intervalHours??asset.interval_hours);
@@ -176,11 +178,14 @@ server.maxHeadersCount=50;
 const scheduler=setInterval(()=>{
   if(!dev && !configured) return;
   for(const asset of db.prepare('SELECT * FROM domains WHERE enabled=1 AND (next_run IS NULL OR next_run<=?)').all(new Date().toISOString())) {
-    void runScan(asset,'scheduler');
+    monitor.enqueue([asset],'scheduler');
   }
   db.prepare('DELETE FROM sessions WHERE expires<?').run(Date.now());
-  db.prepare('DELETE FROM oauth_states WHERE expires<?').run(Date.now());
+  db.prepare('DELETE FROM saml_flows WHERE expires<?').run(Date.now());
+  db.prepare('DELETE FROM saml_requests WHERE expires<?').run(Date.now());
 },30000);
+monitor.pump();
+if(dev||configured)void discovery.pump();
 server.listen(port,host,()=>console.log(`SecHUB: ${appURL.origin} | ${dev?'MODO LOCAL, sem SSO':configured?'Google Workspace configurado':'SSO pendente: acesso protegido bloqueado'}`));
-function shutdown() {clearInterval(scheduler);server.close(()=>{db.close();process.exit(0);});}
+function shutdown() {monitor.stop();discovery.stop();clearInterval(scheduler);server.close(()=>{db.close();process.exit(0);});}
 process.on('SIGINT',shutdown);process.on('SIGTERM',shutdown);
