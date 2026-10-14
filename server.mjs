@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { openStore } from './lib/store.mjs';
 import { normalizeDomain, parseInterval } from './lib/security.mjs';
 import { token, hash } from './lib/auth.mjs';
-import { createSaml } from './lib/saml.mjs';
+import { createSaml, samlDiagnostic } from './lib/saml.mjs';
 import { scanDomain } from './lib/scanner.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -108,9 +108,11 @@ const server = http.createServer(async(req,res)=>{
         audit(email,'login','Google Workspace / SAML');
         res.setHeader('Set-Cookie',[cookie('sechub_session',sid,8*3600),'__Host-sechub_saml=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0']);
         return redirect(res,'/');
-      } catch {
-        audit('anonymous','saml.rejected','Resposta SAML inválida, expirada ou não autorizada');
-        return json(res,403,{error:'Login SAML não autorizado. Inicie novamente pelo botão de login do SecHUB.'});
+      } catch(error) {
+        const diagnostic=samlDiagnostic(error);
+        console.warn('SAML_LOGIN_REJECTED',diagnostic.code);
+        audit('anonymous','saml.rejected',diagnostic.code);
+        return json(res,403,{error:'Login SAML não autorizado.',...diagnostic});
       }
     }
     if(url.pathname.startsWith('/api/')) {

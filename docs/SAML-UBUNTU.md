@@ -137,6 +137,27 @@ Abra https://sechub.casaeterra.com e inicie o login pelo botão do SecHUB. Verif
 
 Login iniciado diretamente pelo IdP, pelo launcher Google ou pelo botão de teste do Admin Console não é aceito nesta implementação. Não desabilite InResponseTo para contornar essa restrição. Logout encerra apenas a sessão SecHUB. Relógio do servidor deve estar sincronizado; tolerância de 60s, janela de login de 10 minutos.
 
+## Diagnosticar rejeição de login
+
+Uma rejeição retorna HTTP 403 com `code` e `hint`. O journal e a auditoria registram somente o código, sem resposta XML, cookies, email ou dados do certificado. Não habilite NODE_DEBUG=node-saml no servidor para compartilhar logs, pois a biblioteca pode imprimir conteúdo da resposta.
+
+```bash
+sudo journalctl -u sechub --since '5 minutes ago' --no-pager
+```
+
+| Código | Conferir |
+| --- | --- |
+| SAML_EMAIL_NOT_ALLOWED | Email principal da conta em ALLOWED_EMAILS e reinício do serviço |
+| SAML_EMAIL_DOMAIN | WORKSPACE_DOMAIN e domínio do email principal |
+| SAML_NAMEID_FORMAT | Formato EMAIL e valor Email principal no Google |
+| SAML_SIGNATURE | Certificado público correto e caixa Resposta assinada marcada |
+| SAML_ISSUER | Entity ID do Google em SAML_IDP_ISSUER |
+| SAML_AUDIENCE | Entity ID do SecHUB no Google e em SAML_SP_ENTITY_ID |
+| SAML_RECIPIENT | ACS no Google e origem HTTPS em APP_URL |
+| SAML_BROWSER_STATE | Cookie Secure/SameSite=None; mesma aba e hostname HTTPS no início e retorno |
+| SAML_FLOW_EXPIRED / SAML_CORRELATION | Novo login iniciado no SecHUB; não reutilizar respostas |
+| SAML_TIME / SAML_SUBJECT | Relógio sincronizado, confirmação de identidade e validade da assertion |
+
 ## Referências
 
 - https://knowledge.workspace.google.com/admin/apps/set-up-your-own-custom-saml-app

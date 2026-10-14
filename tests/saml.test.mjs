@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID,generateKeyPairSync } from 'node:crypto';
 import { SignedXml } from 'xml-crypto';
 import { openStore } from '../lib/store.mjs';
-import { createSaml } from '../lib/saml.mjs';
+import { createSaml,samlDiagnostic } from '../lib/saml.mjs';
 
 const certPath=new URL('./fixtures/idp-test.cert.txt',import.meta.url);
 const cert=readFileSync(certPath,'utf8');
@@ -40,17 +40,26 @@ test('SAML assinado: autentica, rejeita replay, adulteração, IdP/audiência/de
     const begin=async()=>{const flow=await saml.begin();return {...flow,requestId:db.prepare('SELECT request_id FROM saml_flows ORDER BY rowid DESC LIMIT 1').get().request_id};};
     const valid=await begin();
     const fields={RelayState:valid.relay,SAMLResponse:Buffer.from(response(valid.requestId)).toString('base64')};
-    await assert.rejects(saml.complete(fields,'other-browser'));
+    await assert.rejects(saml.complete(fields,'other-browser'),{samlCode:'SAML_BROWSER_STATE'});
     assert.equal(await saml.complete(fields,valid.relay),email);
-    await assert.rejects(saml.complete(fields,valid.relay));
-    for(const options of [{issuer:'evil-idp'},{audience:'wrong-app'},{recipient:'https://evil.example/acs'},{email:'admin@evil.example'},{email:'unlisted@casaeterra.com'},{expired:true},{assertionOnly:true},{tampered:true},{key:generateKeyPairSync('rsa',{modulusLength:2048}).privateKey}]) {
+    await assert.rejects(saml.complete(fields,valid.relay),{samlCode:'SAML_FLOW_EXPIRED'});
+    for(const [options,expectedCode] of [[{issuer:'evil-idp'},'SAML_ISSUER'],[{audience:'wrong-app'},'SAML_AUDIENCE'],[{recipient:'https://evil.example/acs'},'SAML_RECIPIENT'],[{email:'admin@evil.example'},'SAML_EMAIL_DOMAIN'],[{email:'unlisted@casaeterra.com'},'SAML_EMAIL_NOT_ALLOWED'],[{expired:true},'SAML_SUBJECT'],[{assertionOnly:true},'SAML_SIGNATURE'],[{tampered:true},'SAML_SIGNATURE'],[{key:generateKeyPairSync('rsa',{modulusLength:2048}).privateKey},'SAML_SIGNATURE']]) {
       const flow=await begin();let xml=response(flow.requestId,options);
       if(options.tampered)xml=xml.replace('admin@casaeterra.com','evil@casaeterra.com');
-      await assert.rejects(saml.complete({RelayState:flow.relay,SAMLResponse:Buffer.from(xml).toString('base64')},flow.relay),JSON.stringify({...options,key:!!options.key}));
+      await assert.rejects(saml.complete({RelayState:flow.relay,SAMLResponse:Buffer.from(xml).toString('base64')},flow.relay),error=>samlDiagnostic(error).code===expectedCode,expectedCode);
     }
     assert.equal(db.prepare('SELECT count(*) AS n FROM saml_requests').get().n,0);
     assert.equal(db.prepare('SELECT count(*) AS n FROM saml_flows').get().n,0);
   } finally {db.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('diagnóstico SAML não expõe conteúdo bruto, assertion ou identidade',()=>{
+  const secret='PRIVATE_ASSERTION_CONTENT';
+  assert.equal(samlDiagnostic(new Error('Invalid document signature '+secret)).code,'SAML_SIGNATURE');
+  assert.equal(samlDiagnostic(new Error('InResponseTo is not valid '+secret)).code,'SAML_CORRELATION');
+  for(const error of [new Error(secret),new Error('Audience mismatch '+secret),{samlCode:'UNTRUSTED_'+secret,message:secret}]) {
+    assert.ok(!JSON.stringify(samlDiagnostic(error)).includes(secret));
+  }
 });
 
 test('SAML pendente: publica metadados sem IdP e não permite login',async()=>{
