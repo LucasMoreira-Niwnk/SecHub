@@ -6,3 +6,5 @@ node_modules/
 .package-store/
 *.pem
 artifacts/saml-update/
+artifacts/sechub-zap-release.tgz
+artifacts/zap-preview*/

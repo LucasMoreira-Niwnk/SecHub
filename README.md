@@ -1,6 +1,6 @@
 # Casa & Terra · SecHUB
 
-Primeira versão funcional do monitoramento de domínios empresariais. Node.js 24+, SQLite local e interface em português. Autenticação SAML com @node-saml/node-saml; instale as dependências com npm ci.
+Versão 0.3: ZAP integrado ao monitoramento do monitoramento de domínios empresariais. Node.js 24+, SQLite local e interface em português. Autenticação SAML com @node-saml/node-saml; instale as dependências com npm ci.
 
 ## Iniciar
 
@@ -25,7 +25,7 @@ Para abrir diretamente a prévia local no PowerShell: `./run-local.ps1`. Na vali
 - Evidência e orientação por observação. Não armazena valores de cookies, assertions SAML ou respostas HTML dos alvos.
 - Google Workspace via aplicação SAML: assinatura obrigatória da resposta completa (incluindo a assertion), audiência, emissor, Recipient, validade, correlação InResponseTo, vínculo ao navegador e lista explícita de emails. Assinatura separada da assertion é opcional.
 - Sessões opacas de 8h, hash do identificador no banco, proteção CSRF, validação de Host, headers de segurança e auditoria das alterações.
-- Exportação de plano ZAP baseline passivo por domínio. Não executa Docker ou ZAP automaticamente.
+- ZAP integrado: fila persistente, worker isolado, baseline passivo, SQL injection com escopo e janela explícitos, cancelamento e revisão de falsos positivos. Veja [a instalação e os limites](docs/ZAP.md).
 
 ## Habilitar Google Workspace por SAML
 
@@ -58,19 +58,15 @@ O processo deve permanecer em execução para cumprir a agenda. Instale como ser
 
 Endereços privados/reservados são bloqueados antes da conexão HTTPS; a conexão usa o IP público validado para evitar troca de resolução entre validação e acesso. Redirecionamentos para outro hostname não são seguidos. A descoberta opcional registra até 100 subdomínios exatos encontrados em certificados públicos, com agendamentos pausados. Verificar todos processa somente os hosts já registrados sob o domínio; descobrir nomes não ativa monitoramento automaticamente. DNS usa o resolvedor do sistema; não usa DNS público de terceiros configurado pela aplicação.
 
-Falhas do coletor e ausência de headers são observações para investigação. O painel não calcula porcentagem de conformidade, não garante ausência de vulnerabilidades, não enumera todas as versões TLS e não faz validação completa de SPF/DMARC/DNSSEC. Sem notificações externas, integração SIEM, gestão de falsos positivos ou deduplicação entre execuções nesta versão. O painel mostra até 100 execuções recentes e conserva o último estado e resultado de cada ativo; o SQLite mantém o histórico completo.
+Falhas do coletor e ausência de headers são observações para investigação. O painel não calcula porcentagem de conformidade, não garante ausência de vulnerabilidades, não enumera todas as versões TLS e não faz validação completa de SPF/DMARC/DNSSEC. Sem notificações externas ou integração SIEM. A revisão de falsos positivos é por achado de uma execução ZAP; não há supressão automática entre execuções. O painel mostra até 100 execuções recentes e conserva o último estado e resultado de cada ativo; o SQLite mantém o histórico completo.
 
-## SQL injection e abuso de autenticação
+## Análise de aplicações com ZAP
 
-Ainda **não implementados como testes executáveis**. O plano ZAP exportado contém crawl limitado e análise passiva; até um crawler GET pode acionar endpoints de uma aplicação mal projetada. Revise caminhos e exclusões antes de executá-lo.
+A aba **ZAP** executa baseline passivo por host e testes ativos de SQL injection (regra 40018) apenas com URLs, parâmetros de consulta, autorização e janela operacional explícitos. Os achados são importados sem payloads, cookies ou respostas brutas; podem ser confirmados ou marcados como falso positivo com justificativa. O último resultado de cada modo é preservado por host.
 
-Próxima fase: worker ZAP isolado com política ativa de SQL injection, parâmetros e caminhos explícitos, ambiente autorizado e limites de taxa/tempo; importação normalizada dos achados e revisão de falsos positivos. Para autenticação, configurar conta de teste e fluxos de login, MFA, sessão, enumeração e rate limiting. Não usar contas reais nem automatizar tentativas em massa. Testes ativos devem ser configurados por aplicação e janela operacional, preferencialmente em homologação.
+O worker usa contêiner descartável, rede dedicada, IP público fixado e firewall que permite somente TCP 443 nesse IP. A aplicação não recebe acesso ao socket Docker. Não há scan ZAP automático na instalação nem inclusão automática na agenda do baseline nativo.
 
-Exemplo de execução do plano passivo com Docker já instalado, após revisar o arquivo baixado:
-
-```powershell
-docker run --rm -v "${PWD}:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable zap.sh -cmd -autorun /zap/wrk/zap-casaeterra.com.yaml
-```
+Não implementa abuso de autenticação, brute force, testes autenticados, POST/JSON/XML, outras políticas ativas ou coletores privados. Veja [docs/ZAP.md](docs/ZAP.md) para instalação, operação, limites e rollback.
 
 ## Expansão AWS e DNS interno
 

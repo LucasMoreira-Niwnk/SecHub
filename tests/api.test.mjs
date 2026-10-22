@@ -1,15 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync,writeFileSync,existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import http from 'node:http';
 
-async function start(port,dev){
+async function start(port,dev,spool=''){
   const dir=mkdtempSync(join(tmpdir(),'sechub-api-'));
-  const proc=spawn(process.execPath,['server.mjs'],{env:{...process.env,PORT:String(port),HOST:'127.0.0.1',APP_URL:`http://127.0.0.1:${port}`,DEV_MODE:String(dev),DATA_DIR:dir,SAML_ENTRY_POINT:'',SAML_IDP_ISSUER:'',SAML_IDP_CERT_PATH:'',ALLOWED_EMAILS:''},stdio:['ignore','pipe','pipe']});
+  const proc=spawn(process.execPath,['server.mjs'],{env:{...process.env,PORT:String(port),HOST:'127.0.0.1',APP_URL:`http://127.0.0.1:${port}`,DEV_MODE:String(dev),DATA_DIR:dir,ZAP_SPOOL_DIR:spool,SAML_ENTRY_POINT:'',SAML_IDP_ISSUER:'',SAML_IDP_CERT_PATH:'',ALLOWED_EMAILS:''},stdio:['ignore','pipe','pipe']});
   await Promise.race([once(proc.stdout,'data'),once(proc,'exit').then(()=>{throw new Error('Servidor não iniciou.');}),new Promise((_,reject)=>{const t=setTimeout(()=>reject(new Error('Timeout')),10000);t.unref();})]);
   return {origin:`http://127.0.0.1:${port}`,stop:async()=>{proc.kill();await once(proc,'exit');rmSync(dir,{recursive:true,force:true});}};
 }
@@ -31,6 +31,31 @@ test('produção: API bloqueada sem SAML, metadados públicos e Host validado',a
     });
     assert.equal(badHostStatus,400);
   }finally{await server.stop();}
+});
+test('ZAP API: entrega ao worker simulado, importa por host e audita revisão com CSRF',async()=>{
+  const spool=mkdtempSync(join(tmpdir(),'sechub-zap-api-'));
+  writeFileSync(join(spool,'status.json'),JSON.stringify({ready:true,at:new Date().toISOString(),version:1}));
+  const server=await start(3199,true,spool);
+  try{
+    const auth=await(await fetch(server.origin+'/api/session')).json();
+    const headers={'Content-Type':'application/json',Origin:server.origin,'X-CSRF-Token':auth.user.csrf};
+    const post=(path,data,custom=headers)=>fetch(server.origin+path,{method:'POST',headers:custom,body:JSON.stringify(data)});
+    const queued=await post('/api/domains/initial-domain/zap',{mode:'baseline'});assert.equal(queued.status,202);
+    const {id}=await queued.json();assert.ok(existsSync(join(spool,id+'.job.json')));
+    writeFileSync(join(spool,id+'.result.json'),JSON.stringify({status:'completed',result:{engine:'zap',mode:'baseline',findings:[{id:'zap-10020',source:'zap',title:'Fixture alert',severity:'low',review:'pending'}]}}));
+    let overview;
+    for(let i=0;i<30;i++){
+      overview=await(await fetch(server.origin+'/api/overview')).json();
+      if(overview.zapScans[0].status==='completed')break;
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    assert.equal(overview.domains[0].latest_zap[0].result.findings[0].id,'zap-10020');
+    assert.equal((await post(`/api/zap/${id}/review`,{findingId:'zap-10020',status:'confirmed',reason:''},{})).status,403);
+    assert.equal((await post(`/api/zap/${id}/review`,{findingId:'zap-10020',status:'confirmed',reason:''})).status,200);
+    const reviewed=await(await fetch(server.origin+'/api/overview')).json();
+    assert.equal(reviewed.domains[0].latest_zap[0].result.findings[0].review,'confirmed');
+    assert.ok(reviewed.audit.some(a=>a.action==='zap.review'));
+  }finally{await server.stop();rmSync(spool,{recursive:true,force:true});}
 });
 test('modo local: CSRF, cadastro, duplicatas, agenda e exportação',async()=>{
   const server=await start(3198,true);
@@ -58,6 +83,9 @@ test('modo local: CSRF, cadastro, duplicatas, agenda e exportação',async()=>{
     assert.equal(exported.domains.length,3);
     assert.equal(exported.scans.length,0);
     const plan=await(await fetch(server.origin+`/api/domains/${domain.id}/zap-plan`)).text();
-    assert.match(plan,/passiveScan-wait/);assert.doesNotMatch(plan,/type: activeScan/);
+    assert.match(plan,/passiveScan-wait/);assert.ok(!JSON.parse(plan).jobs.some(j=>j.type==='activeScan'));
+    assert.equal((await post(`/api/domains/${domain.id}/zap`,{mode:'baseline'})).status,403);
+    assert.equal((await post(`/api/domains/${domain.id}/zap`,{mode:'baseline'},headers)).status,400);
+    assert.equal(after.zap.enabled,false);
   }finally{await server.stop();}
 });

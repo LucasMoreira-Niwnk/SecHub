@@ -1,0 +1,25 @@
+[Unit]
+Description=SecHUB isolated ZAP worker
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+PartOf=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=sechub
+UMask=0027
+ExecStartPre=/usr/local/lib/sechub-zap/deploy/zap-firewall.sh
+ExecStart=/opt/node24/bin/node /usr/local/lib/sechub-zap/worker/zap-worker.mjs
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/spool/sechub-zap /var/lib/sechub-zap-worker /run
+
+[Install]
+WantedBy=multi-user.target
