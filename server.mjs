@@ -9,6 +9,8 @@ import { token, hash } from './lib/auth.mjs';
 import { createSaml, samlDiagnostic } from './lib/saml.mjs';
 import { createMonitor } from './lib/monitor.mjs';
 import { createDiscovery } from './lib/discovery.mjs';
+import { createZapQueue } from './lib/zap-queue.mjs';
+import { zapPlan } from './lib/zap.mjs';
 import { inventory,decodeScan,relinkHierarchy,withinDomain,MAX_ASSETS } from './lib/inventory.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -28,6 +30,7 @@ db.prepare('INSERT OR IGNORE INTO domains(id,hostname,created_at) VALUES(?,?,?)'
 relinkHierarchy(db);
 const monitor=createMonitor({db,audit,canRun:()=>dev||configured});
 const discovery=createDiscovery({db,audit});
+const zap=createZapQueue({db,audit,canRun:()=>dev||configured});
 const running=monitor.running;
 const json = (res,status,data) => { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(data)); };
 const redirect = (res,path,cookie) => {res.writeHead(302,{Location:path,...(cookie?{'Set-Cookie':cookie}:{})});res.end();};
@@ -55,7 +58,9 @@ async function body(req,form=false) {
 function getOverview() {
   const domains = inventory(db);
   const scans = db.prepare('SELECT scans.*,domains.hostname FROM scans JOIN domains ON domains.id=scans.domain_id ORDER BY started_at DESC LIMIT 100').all().map(decodeScan);
-  return {domains,scans,audit:db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 50').all(),running:[...running],
+  const latestZap=db.prepare("SELECT * FROM zap_scans WHERE domain_id=? AND mode=? AND status='completed' ORDER BY rowid DESC LIMIT 1");
+  for(const d of domains)d.latest_zap=['baseline','sqli'].map(mode=>decodeScan(latestZap.get(d.id,mode))).filter(Boolean);
+  return {domains,scans,zapScans:zap.list(),zap:zap.status(),audit:db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 50').all(),running:[...running],
     queued:db.prepare("SELECT domain_id FROM scans WHERE status='queued'").all().map(s=>s.domain_id),
     discoveries:db.prepare('SELECT * FROM discoveries ORDER BY rowid DESC LIMIT 100').all().map(decodeScan)};
 }
@@ -106,6 +111,10 @@ const server = http.createServer(async(req,res)=>{
       if(!user) return json(res,401,{error:'Faça login com a conta corporativa.'});
       if(req.method!=='GET' && (req.headers.origin!==appURL.origin || req.headers['x-csrf-token']!==user.csrf)) return json(res,403,{error:'Origem ou token de proteção inválido.'});
       if(req.method==='GET' && url.pathname==='/api/overview') return json(res,200,getOverview());
+      const zapReview=url.pathname.match(/^\/api\/zap\/([a-f0-9-]{36})\/review$/);
+      if(req.method==='POST'&&zapReview)return json(res,200,zap.review(zapReview[1],await body(req),user.email));
+      const zapCancel=url.pathname.match(/^\/api\/zap\/([a-f0-9-]{36})\/cancel$/);
+      if(req.method==='POST'&&zapCancel)return json(res,200,zap.cancel(zapCancel[1],user.email));
       if(req.method==='GET' && url.pathname==='/api/export') {
         res.setHeader('Content-Disposition','attachment; filename="sechub-report.json"');
         return json(res,200,{exportedAt:new Date().toISOString(),...getOverview()});
@@ -129,10 +138,11 @@ const server = http.createServer(async(req,res)=>{
         const discoveryJob=data.discoverSubdomains===false?null:discovery.enqueue(db.prepare('SELECT * FROM domains WHERE id=?').get(id),user.email);
         return json(res,201,{ok:true,id,discovery:discoveryJob});
       }
-      const match=url.pathname.match(/^\/api\/domains\/([^/]+)(?:\/(scan|scan-tree|discover|schedule|zap-plan))?$/);
+      const match=url.pathname.match(/^\/api\/domains\/([^/]+)(?:\/(scan|scan-tree|discover|schedule|zap-plan|zap))?$/);
       if(match) {
         const asset=db.prepare('SELECT * FROM domains WHERE id=?').get(match[1]);
         if(!asset) return json(res,404,{error:'Domínio não encontrado.'});
+        if(req.method==='POST' && match[2]==='zap')return json(res,202,zap.enqueue(asset,await body(req),user.email));
         if(req.method==='POST' && ['scan','scan-tree'].includes(match[2])) {
           const assets=match[2]==='scan-tree'?db.prepare('SELECT * FROM domains ORDER BY hostname').all().filter(d=>d.id===asset.id||withinDomain(d.hostname,asset.hostname)):[asset];
           const result=monitor.enqueue(assets,user.email);
@@ -150,8 +160,7 @@ const server = http.createServer(async(req,res)=>{
           return json(res,200,{ok:true});
         }
         if(req.method==='GET' && match[2]==='zap-plan') {
-          const escaped=asset.hostname.replaceAll('.','\\.');
-          const plan=`# Baseline passivo. Execute somente no domínio empresarial autorizado.\n# SQL injection e abuso de autenticação NÃO são testados por este plano.\nenv:\n  contexts:\n    - name: CasaTerra\n      urls: ["https://${asset.hostname}/"]\n      includePaths: ['https://${escaped}/.*']\n      excludePaths: ['https://${escaped}/.*(?:logout|signout|delete|remove).*']\n  parameters:\n    failOnError: true\njobs:\n  - type: passiveScan-config\n    parameters:\n      scanOnlyInScope: true\n  - type: spider\n    parameters:\n      context: CasaTerra\n      maxDuration: 1\n      maxDepth: 2\n  - type: passiveScan-wait\n    parameters:\n      maxDuration: 3\n  - type: report\n    parameters:\n      template: traditional-json\n      reportDir: /zap/wrk\n      reportFile: zap-report\n`;
+          const plan=zapPlan({hostname:asset.hostname,mode:'baseline'});
           res.writeHead(200,{'Content-Type':'text/yaml; charset=utf-8','Content-Disposition':`attachment; filename="zap-${asset.hostname}.yaml"`});return res.end(plan);
         }
       }
@@ -168,7 +177,7 @@ const server = http.createServer(async(req,res)=>{
     json(res,404,{error:'Página não encontrada.'});
   } catch(e) {
     const message=String(e.message);
-    const expected=/Domínio|Informe|Intervalo|JSON|Requisição|Agendamento/.test(message);
+    const expected=/Domínio|Informe|Intervalo|JSON|Requisição|Agendamento|^ZAP:/.test(message);
     json(res,expected?400:500,{error:expected?message:'Não foi possível concluir a operação. Confira a configuração e tente novamente.'});
   }
 });
@@ -187,5 +196,5 @@ const scheduler=setInterval(()=>{
 monitor.pump();
 if(dev||configured)void discovery.pump();
 server.listen(port,host,()=>console.log(`SecHUB: ${appURL.origin} | ${dev?'MODO LOCAL, sem SSO':configured?'Google Workspace configurado':'SSO pendente: acesso protegido bloqueado'}`));
-function shutdown() {monitor.stop();discovery.stop();clearInterval(scheduler);server.close(()=>{db.close();process.exit(0);});}
+function shutdown() {monitor.stop();discovery.stop();zap.stop();clearInterval(scheduler);server.close(()=>{db.close();process.exit(0);});}
 process.on('SIGINT',shutdown);process.on('SIGTERM',shutdown);
