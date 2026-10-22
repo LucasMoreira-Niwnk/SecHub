@@ -54,11 +54,12 @@ async function execute(job){
   const name='sechub-zap-'+job.id;currentContainer=name;
   try {
     writeFileSync(join(dir,'plan.yaml'),zapPlan(r),{mode:0o644});
+    chmodSync(join(dir,'plan.yaml'),0o644);
     chownSync(dir,1000,1000);chmodSync(dir,0o700);
     await seal();
     await firewall('-I','SECHUB_ZAP','1','-d',address,'-p','tcp','--dport','443','-j','RETURN');
     const timeout=Math.min(ZAP_TIMEOUT_MS,r.mode==='sqli'?Date.parse(r.windowEnd)-Date.now():ZAP_TIMEOUT_MS);
-    await runContainer(['run','--rm','--name',name,'--network','sechub-zap','--dns','127.0.0.1','--add-host',`${r.hostname}:${address}`,'--user','1000:1000','--cap-drop','ALL','--security-opt','no-new-privileges','--cpus','1','--memory','2g','--pids-limit','256','--read-only','--tmpfs','/tmp:rw,nosuid,size=256m','--tmpfs','/home/zap/.ZAP:rw,uid=1000,gid=1000,size=256m','--mount',`type=bind,src=${dir},dst=/zap/wrk`,'-e','JAVA_OPTS=-Xmx1200m',policy.image,'zap.sh','-cmd','-silent','-autorun','/zap/wrk/plan.yaml'],timeout,job.id);
+    await runContainer(['run','--rm','--hostname','sechub-zap','--add-host','sechub-zap:127.0.0.1','--name',name,'--network','sechub-zap','--dns','127.0.0.1','--add-host',`${r.hostname}:${address}`,'--user','1000:1000','--cap-drop','ALL','--security-opt','no-new-privileges','--cpus','1','--memory','2g','--pids-limit','256','--read-only','--tmpfs','/tmp:rw,nosuid,size=256m','--tmpfs','/home/zap/.ZAP:rw,uid=1000,gid=1000,size=256m','--tmpfs','/home/zap/.java:rw,uid=1000,gid=1000,size=8m','--mount',`type=bind,src=${dir},dst=/zap/wrk`,policy.image,'zap.sh','-Xmx1200m','-cmd','-silent','-autorun','/zap/wrk/plan.yaml'],timeout,job.id);
     const report=readJSON(join(dir,'report.json'),16*1024*1024);
     return normalizeZapReport(report,r.hostname,r.mode);
   }finally{

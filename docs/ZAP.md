@@ -46,6 +46,14 @@ Confira serviços, `/var/spool/sechub-zap/status.json`, espaço em disco, `docke
 
 Para desativar: cancele trabalhos pendentes pelo painel, pare/desabilite `sechub-zap-worker`, remova `ZAP_SPOOL_DIR` de `/etc/sechub.env` e reinicie `sechub`. Para voltar o código, pare `sechub`, volte ao commit anterior e inicie novamente. As migrações são aditivas; não é necessário restaurar ou apagar o banco. Preserve o backup e o histórico de auditoria. Não remova Docker, redes ou regras compartilhadas por outros serviços.
 
+## Validação do runtime
+
+Validado em Debian 12 com ZAP 2.17.0 e Java 17, imagem `ghcr.io/zaproxy/zaproxy@sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6`. A heap é limitada pelo argumento `zap.sh -Xmx1200m`; essa imagem não aplica `JAVA_OPTS` para esse fim. O contêiner recebe hostname local e diretórios de preferências temporários, e o plano permanece legível mesmo sob UMask 0027 do systemd.
+
+`deploy/check-zap-plans.mjs` valida os dois planos sem rede. `deploy/smoke-zap.mjs` executa ambos contra uma aplicação HTTPS descartável em uma rede Docker interna, sem acesso externo: confirma detecção da falha SQLi simulada, importação do relatório e ausência de POST ou caminhos não autorizados. Exige root e o digest da imagem como argumento. O alvo e a rede de teste são removidos ao terminar. Não usa sistemas empresariais como alvo.
+
+O contexto ZAP compara caminhos sem query string. No modo ativo, o contexto contém caminhos exatos; a lista inicial de URLs determina os parâmetros testados. Crawling, parâmetros adicionais, corpos, headers e cookies ficam desabilitados. O teste real do runtime cobre esse contrato, além dos testes Node.
+
 ## Referências
 
 - [ZAP Automation Framework](https://www.zaproxy.org/docs/automate/automation-framework/)

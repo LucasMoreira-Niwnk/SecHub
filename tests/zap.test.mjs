@@ -27,8 +27,12 @@ test('ZAP: baseline sem scan ativo; SQLi sem spider, apenas regra 40018, GET e q
   const scan=plan.jobs.find(j=>j.type==='activeScan');assert.equal(scan.policyDefinition.defaultThreshold,'Off');assert.deepEqual(scan.policyDefinition.rules.map(r=>r.id),[40018]);assert.equal(scan.parameters.threadPerHost,1);
   const config=plan.jobs.find(j=>j.type==='activeScan-config');assert.equal(config.inputVectors.postData.enabled,false);assert.equal(config.inputVectors.cookieData.enabled,false);
   const regex=new RegExp('^(?:'+plan.env.contexts[0].includePaths[0]+')$');
-  assert.ok(regex.test('https://app.example.com/search?q=test'));
-  for(const url of ['https://other.example.com/search?q=1','https://app.example.com/search/other?q=1','https://app.example.com/search?q=1&unapproved=2'])assert.ok(!regex.test(url));
+  // Context.isInContext strips query strings before matching the pattern.
+  const inContext=url=>regex.test(url.split('?')[0]);
+  assert.ok(inContext('https://app.example.com/search?q=test'));
+  for(const url of ['https://other.example.com/search?q=1','https://app.example.com/search/other?q=1'])assert.ok(!inContext(url));
+  assert.deepEqual(plan.jobs.find(j=>j.type==='requestor').requests.map(r=>r.url),['https://app.example.com/search?q=sample']);
+  assert.equal(config.inputVectors.urlQueryStringAndDataDrivenNodes.addParam,false);
 });
 test('ZAP: normalização descarta payloads, HTML, parâmetros e hosts fora do escopo',()=>{
   const report={site:[{'@name':'https://other.example.com',alerts:[{pluginid:'999',name:'wrong'}]},{'@name':'https://app.example.com',alerts:[{pluginid:'40018',name:'SQL Injection',riskcode:'3',confidence:'2',cweid:'89',count:'2',solution:'<p>Use prepared statements</p>',instances:[{uri:'https://app.example.com/?token=SECRET',evidence:'SECRET',attack:'PAYLOAD'}]},{pluginid:'40018',name:'duplicate'}]}]};
