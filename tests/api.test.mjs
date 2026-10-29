@@ -6,9 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import http from 'node:http';
+import {openStore} from '../lib/store.mjs';
+import {registerAdSource} from '../lib/ad.mjs';
 
-async function start(port,dev,spool=''){
+async function start(port,dev,spool='',initialize){
   const dir=mkdtempSync(join(tmpdir(),'sechub-api-'));
+  if(initialize)initialize(dir);
   const proc=spawn(process.execPath,['server.mjs'],{env:{...process.env,PORT:String(port),HOST:'127.0.0.1',APP_URL:`http://127.0.0.1:${port}`,DEV_MODE:String(dev),DATA_DIR:dir,ZAP_SPOOL_DIR:spool,SAML_ENTRY_POINT:'',SAML_IDP_ISSUER:'',SAML_IDP_CERT_PATH:'',ALLOWED_EMAILS:''},stdio:['ignore','pipe','pipe']});
   await Promise.race([once(proc.stdout,'data'),once(proc,'exit').then(()=>{throw new Error('Servidor não iniciou.');}),new Promise((_,reject)=>{const t=setTimeout(()=>reject(new Error('Timeout')),10000);t.unref();})]);
   return {origin:`http://127.0.0.1:${port}`,stop:async()=>{proc.kill();await once(proc,'exit');rmSync(dir,{recursive:true,force:true});}};
@@ -17,6 +20,7 @@ test('produção: API bloqueada sem SAML, metadados públicos e Host validado',a
   const server=await start(3197,false);
   try{
     assert.equal((await fetch(server.origin+'/api/overview')).status,401);
+    assert.equal((await fetch(server.origin+'/api/ad/ingest',{method:'POST'})).status,401);
     assert.equal((await fetch(server.origin+'/api/aws/iam-policy')).status,401);
     assert.equal((await fetch(server.origin+'/api/collector/claim',{method:'POST'})).status,401);
     assert.equal((await fetch(server.origin+'/auth/saml/login')).status,503);
@@ -32,6 +36,30 @@ test('produção: API bloqueada sem SAML, metadados públicos e Host validado',a
       http.get(server.origin+'/health',{headers:{Host:'evil.example'}},res=>{res.resume();resolve(res.statusCode);}).on('error',reject);
     });
     assert.equal(badHostStatus,400);
+  }finally{await server.stop();}
+});
+
+test('AD API: token exclusivo de ingestão, CSRF em regras, alerta e revisão por sessão',async()=>{
+  let registration;
+  const server=await start(3195,true,'',dir=>{const store=openStore(dir);registration=registerAdSource(store.db,{name:'DC fixture',controller:'10.20.0.6'});store.db.close();});
+  try{
+    const auth=await(await fetch(server.origin+'/api/session')).json();
+    const headers={'Content-Type':'application/json',Origin:server.origin,'X-CSRF-Token':auth.user.csrf};
+    const post=(path,data,h=headers)=>fetch(server.origin+path,{method:'POST',headers:h,body:JSON.stringify(data)});
+    assert.equal((await post('/api/ad/rules',{},{})).status,403);
+    assert.equal((await post('/api/ad/rules',{failureThreshold:3})).status,200);
+    const payload={status:'ok',events:Array.from({length:3},(_,i)=>({eventId:4625,recordId:i+1,time:new Date(Date.now()-1000+i).toISOString(),user:'tester',domain:'corp',ip:'10.20.0.30',status:'0xc000006a'}))};
+    assert.equal((await post('/api/ad/ingest',payload)).status,401);
+    const worker={'Content-Type':'application/json',Authorization:'Bearer '+registration.token};
+    assert.equal((await post('/api/ad/ingest',payload,worker)).status,200);
+    assert.equal((await post('/api/collector/claim',{capabilities:{}},worker)).status,401);
+    const overview=await(await fetch(server.origin+'/api/overview')).json();
+    assert.equal(overview.ad.counts.events,3);assert.equal(overview.ad.alerts.length,1);assert.ok(!JSON.stringify(overview).includes(registration.token));
+    const id=overview.ad.alerts[0].id;
+    const alert=await(await fetch(server.origin+'/api/ad/alerts/'+id)).json();assert.equal(alert.evidence.length,3);
+    assert.equal((await post('/api/ad/alerts/'+id+'/review',{status:'confirmed',reason:'Validated in test'})).status,200);
+    assert.equal((await post('/api/ad/ingest',payload,worker)).status,200);
+    assert.equal((await(await fetch(server.origin+'/api/overview')).json()).ad.counts.events,3);
   }finally{await server.stop();}
 });
 test('ZAP API: entrega ao worker simulado, importa por host e audita revisão com CSRF',async()=>{
@@ -100,15 +128,15 @@ test('API de coleta: registro protegido, claim/lease isolado, resultado autentic
     assert.equal((await post('/api/collectors',{name:'Fixture',zone:'corporate'},{})).status,403);
     const registration=await(await post('/api/collectors',{name:'Fixture',zone:'corporate'})).json();
     const worker={'Content-Type':'application/json',Authorization:'Bearer '+registration.token};
-    const capabilities={internal:{suffixes:['casaeterra.com'],cidrs:['10.4.0.0/24'],dnsServers:['10.4.0.6']},aws:{roleArns:[],sourceProfiles:['sechub-source'],regions:['us-east-1','sa-east-1']}};
+    const capabilities={internal:{suffixes:['example.test'],cidrs:['10.20.0.0/24'],dnsServers:['10.20.0.6']},aws:{roleArns:[],sourceProfiles:['sechub-source'],regions:['us-east-1','sa-east-1']}};
     assert.equal((await post('/api/collector/claim',{capabilities},worker)).status,200);
-    const added=await post('/api/internal/assets',{collectorId:registration.id,hostname:'app.casaeterra.com'});assert.equal(added.status,201);const {id}=await added.json();
+    const added=await post('/api/internal/assets',{collectorId:registration.id,hostname:'app.example.test'});assert.equal(added.status,201);const {id}=await added.json();
     const enqueued=await post(`/api/internal/assets/${id}/scan`,{});assert.equal(enqueued.status,202);
     const {job}=await(await post('/api/collector/claim',{capabilities},worker)).json();
     assert.ok(job.lease);assert.equal(job.kind,'internal');
     const overview=await(await fetch(server.origin+'/api/overview')).json();assert.ok(!JSON.stringify(overview).includes(registration.token));assert.ok(!JSON.stringify(overview).includes(job.lease));
     assert.equal((await post('/api/collector/result',{id:job.id,lease:'wrong',status:'completed'},worker)).status,400);
-    assert.equal((await post('/api/collector/result',{id:job.id,lease:job.lease,status:'completed',result:{dns:{a:{records:['10.4.0.20']},aaaa:{records:[]}},web:{status:200},findings:[{code:'fixture',severity:'info',title:'Internal fixture'}]}},worker)).status,200);
+    assert.equal((await post('/api/collector/result',{id:job.id,lease:job.lease,status:'completed',result:{dns:{a:{records:['10.20.0.20']},aaaa:{records:[]}},web:{status:200},findings:[{code:'fixture',severity:'info',title:'Internal fixture'}]}},worker)).status,200);
     const result=await(await fetch(server.origin+'/api/collection-jobs/'+job.id)).json();assert.equal(result.result.findings[0].title,'Internal fixture');assert.equal(result.lease_hash,undefined);
     const aws=await post('/api/aws/connections',{collectorId:registration.id,name:'AWS fixture',accountId:'123456789012',roleArn:'arn:aws:iam::123456789012:role/ReadOnly',sourceProfile:'sechub-source',regions:['us-east-1','sa-east-1']});assert.equal(aws.status,201);
     const connection=await aws.json();assert.equal((await post(`/api/aws/connections/${connection.id}/scan`,{})).status,400);

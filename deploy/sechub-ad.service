@@ -1,0 +1,34 @@
+[Unit]
+Description=SecHUB Active Directory authentication event collector
+Wants=network-online.target
+After=network-online.target sechub.service
+
+[Service]
+Type=simple
+User=sechub-ad
+Group=sechub-ad
+WorkingDirectory=/usr/local/lib/sechub-ad
+EnvironmentFile=/etc/sechub-ad.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/local/lib/sechub-ad/venv/bin/python /usr/local/lib/sechub-ad/ad_collector.py
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=70
+StateDirectory=sechub-ad
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

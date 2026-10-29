@@ -3,6 +3,7 @@ data/
 coverage/
 *.log
 node_modules/
+__pycache__/
 .package-store/
 *.pem
 artifacts/saml-update/
