@@ -55,7 +55,7 @@ async function main(){
   while(!stopped){
     try{
       const policy=readPolicy();const {job}=await post('claim',{version:1,capabilities:policy});
-      if(job)await execute(job,policy);
+      if(job){await execute(job,policy);continue;}
     }catch(error){console.warn('COLLECTOR_UNAVAILABLE',/^CONTROLLER_HTTP_\d+$/.test(error.message)?error.message:'CONFIG_OR_CONNECTION_ERROR');}
     if(!stopped)await pause(10000);
   }
