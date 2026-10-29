@@ -11,6 +11,17 @@ spec.loader.exec_module(ad)
 
 
 class WorkerTests(unittest.TestCase):
+    def test_malformed_json_reports_config_error_without_echoing_secret(self):
+        class ConfigPath:
+            @staticmethod
+            def stat():
+                return type('Info', (), {'st_uid': 0, 'st_mode': 0o640})()
+            @staticmethod
+            def read_text(**_):
+                return '{"password": PRIVATE_VALUE_NOT_JSON}'
+        with self.assertRaisesRegex(ValueError, '^CONFIG_INVALID$'):
+            ad.configuration(ConfigPath(), '10.20.0.6')
+
     def test_transport_always_encrypts_and_validates_certificate(self):
         class WinRM:
             @staticmethod

@@ -17,7 +17,10 @@ def configuration(path, controller):
     info = path.stat()
     if os.name != 'nt' and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o037):
         raise ValueError('CONFIG_INVALID')
-    value = json.loads(path.read_text(encoding='utf-8'))
+    try:
+        value = json.loads(path.read_text(encoding='utf-8'))
+    except (ValueError, OSError, UnicodeError):
+        raise ValueError('CONFIG_INVALID') from None
     if not isinstance(value, dict) or not isinstance(value.get('enabled'), bool):
         raise ValueError('CONFIG_INVALID')
     endpoint = urlparse(value.get('endpoint', ''))
