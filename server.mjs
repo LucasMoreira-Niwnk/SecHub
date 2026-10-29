@@ -12,6 +12,7 @@ import { createDiscovery } from './lib/discovery.mjs';
 import { createZapQueue } from './lib/zap-queue.mjs';
 import { zapPlan } from './lib/zap.mjs';
 import { createCollections } from './lib/collections.mjs';
+import { createAd } from './lib/ad.mjs';
 import { inventory,decodeScan,relinkHierarchy,withinDomain,MAX_ASSETS } from './lib/inventory.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -33,6 +34,7 @@ const monitor=createMonitor({db,audit,canRun:()=>dev||configured});
 const discovery=createDiscovery({db,audit});
 const zap=createZapQueue({db,audit,canRun:()=>dev||configured});
 const collections=createCollections({db,audit,canRun:()=>dev||configured});
+const ad=createAd({db,audit});
 const running=monitor.running;
 const json = (res,status,data) => { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(data)); };
 const redirect = (res,path,cookie) => {res.writeHead(302,{Location:path,...(cookie?{'Set-Cookie':cookie}:{})});res.end();};
@@ -62,7 +64,7 @@ function getOverview() {
   const scans = db.prepare('SELECT scans.*,domains.hostname FROM scans JOIN domains ON domains.id=scans.domain_id ORDER BY started_at DESC LIMIT 100').all().map(decodeScan);
   const latestZap=db.prepare("SELECT * FROM zap_scans WHERE domain_id=? AND mode=? AND status='completed' ORDER BY rowid DESC LIMIT 1");
   for(const d of domains)d.latest_zap=['baseline','sqli'].map(mode=>decodeScan(latestZap.get(d.id,mode))).filter(Boolean);
-  return {domains,scans,zapScans:zap.list(),zap:zap.status(),...collections.overview(),audit:db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 50').all(),running:[...running],
+  return {domains,scans,zapScans:zap.list(),zap:zap.status(),...collections.overview(),ad:ad.overview(),audit:db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 50').all(),running:[...running],
     queued:db.prepare("SELECT domain_id FROM scans WHERE status='queued'").all().map(s=>s.domain_id),
     discoveries:db.prepare('SELECT * FROM discoveries ORDER BY rowid DESC LIMIT 100').all().map(decodeScan)};
 }
@@ -108,6 +110,12 @@ const server = http.createServer(async(req,res)=>{
         return json(res,403,{error:'Login SAML não autorizado.',...diagnostic});
       }
     }
+    if(url.pathname==='/api/ad/ingest'){
+      const source=ad.authenticate(req.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]{32,200})$/)?.[1]);
+      if(!source)return json(res,401,{error:'AD: coletor não autorizado.'});
+      if(req.method!=='POST')return json(res,405,{error:'Use POST.'});
+      return json(res,200,ad.ingest(source,await body(req,false,2*1024*1024)));
+    }
     if(url.pathname.startsWith('/api/collector/')){
       const secret=req.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]{32,200})$/)?.[1];
       const worker=collections.authenticate(secret);
@@ -124,6 +132,10 @@ const server = http.createServer(async(req,res)=>{
       if(!user) return json(res,401,{error:'Faça login com a conta corporativa.'});
       if(req.method!=='GET' && (req.headers.origin!==appURL.origin || req.headers['x-csrf-token']!==user.csrf)) return json(res,403,{error:'Origem ou token de proteção inválido.'});
       if(req.method==='GET' && url.pathname==='/api/overview') return json(res,200,getOverview());
+      if(req.method==='POST'&&url.pathname==='/api/ad/rules')return json(res,200,ad.configure(await body(req),user.email));
+      const adAlert=url.pathname.match(/^\/api\/ad\/alerts\/([a-f0-9]{64})(\/review)?$/);
+      if(adAlert&&req.method==='GET'&&!adAlert[2]){const result=ad.alert(adAlert[1]);return json(res,result?200:404,result||{error:'AD: alerta não encontrado.'});}
+      if(adAlert&&req.method==='POST'&&adAlert[2])return json(res,200,ad.review(adAlert[1],await body(req),user.email));
       if(req.method==='GET'&&url.pathname==='/api/aws/iam-policy'){
         res.setHeader('Content-Disposition','attachment; filename="sechub-aws-readonly-policy.json"');
         return json(res,200,JSON.parse(readFileSync(resolve(root,'deploy/aws-readonly-policy.json'),'utf8')));
@@ -208,7 +220,7 @@ const server = http.createServer(async(req,res)=>{
     json(res,404,{error:'Página não encontrada.'});
   } catch(e) {
     const message=String(e.message);
-    const expected=/Domínio|Informe|Intervalo|JSON|Requisição|Agendamento|^ZAP:|^Coleta:/.test(message);
+    const expected=/Domínio|Informe|Intervalo|JSON|Requisição|Agendamento|^ZAP:|^Coleta:|^AD:/.test(message);
     json(res,expected?400:500,{error:expected?message:'Não foi possível concluir a operação. Confira a configuração e tente novamente.'});
   }
 });
@@ -217,6 +229,7 @@ server.headersTimeout=10000;
 server.maxHeadersCount=50;
 const scheduler=setInterval(()=>{
   collections.tick();
+  ad.prune();
   if(!dev && !configured) return;
   for(const asset of db.prepare('SELECT * FROM domains WHERE enabled=1 AND (next_run IS NULL OR next_run<=?)').all(new Date().toISOString())) {
     monitor.enqueue([asset],'scheduler');

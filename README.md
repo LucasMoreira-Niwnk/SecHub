@@ -1,6 +1,6 @@
 # Casa & Terra · SecHUB
 
-Versão 0.4: monitoramento público e interno, ZAP e coleta AWS de leitura. Node.js 24+, SQLite local e interface em português. Autenticação SAML com @node-saml/node-saml; instale as dependências com npm ci.
+Versão 0.5: monitoramento público e interno, ZAP, coleta AWS de leitura e eventos de autenticação do AD. Node.js 24+, SQLite local e interface em português. Autenticação SAML com @node-saml/node-saml; instale as dependências com npm ci.
 
 ## Iniciar
 
@@ -72,7 +72,7 @@ Não implementa abuso de autenticação, brute force, testes autenticados, POST/
 
 A versão 0.4 inclui as abas **Domínios internos**, **AWS** e **Coletores**. O coletor corporativo/VPC é um serviço separado, com token próprio, política local de sufixos/CIDRs/DNS, fila persistente, leases, cancelamento, agendas pausadas e resultados por execução.
 
-O escopo interno autorizado é `casaeterra.com`, CIDR `10.4.0.0/24`, DNS `10.4.0.6`. O worker interno avalia DNS A/AAAA e HTTPS/TLS na porta 443, fixando o IP validado e bloqueando respostas fora do escopo, DNS misto, metadata, o próprio coletor e os servidores DNS. Não realiza descoberta de rede ou ZAP ativo interno. O scanner público e o worker ZAP público mantêm seus bloqueios a IPs privados.
+O escopo interno é definido pela administração no arquivo protegido de política do coletor, com sufixos, CIDRs e DNS autorizados. O worker interno avalia DNS A/AAAA e HTTPS/TLS na porta 443, fixando o IP validado e bloqueando respostas fora do escopo, DNS misto, metadata, o próprio coletor e os servidores DNS. Não realiza descoberta de rede ou ZAP ativo interno. O scanner público e o worker ZAP público mantêm seus bloqueios a IPs privados.
 
 AWS é configurada posteriormente pelo painel, com Account ID numérico, Role ARN, perfil de origem e regiões explícitas (`us-east-1` e `sa-east-1` por padrão). A coleta usa IAM Role/STS e AWS CLI v2 em modo somente leitura: Security Hub, GuardDuty, Inspector, zonas Route 53 e endpoints Resolver. Não recebe access keys pelo painel, não altera recursos AWS e não habilita serviços pagos. Resultados com falhas de permissão, serviço não habilitado ou limites são apresentados como parciais.
 
@@ -100,3 +100,7 @@ Testes locais cobrem rejeição de IPs privados, validação de respostas e asse
 - [AWS Security Hub CSPM: standards](https://docs.aws.amazon.com/securityhub/latest/userguide/standards-reference.html)
 
 Paleta extraída dos estilos do [site oficial Casa & Terra](https://casaeterra.com/): azul-marinho `#0d2137`, vermelho `#e53935` e branco. A marca tipográfica do painel é uma composição local, não o arquivo oficial do logotipo.
+
+## Active Directory
+
+Coleta de eventos Security via WinRM com mensagens criptografadas, correlação de falhas e revisão de alertas no painel. Credenciais em arquivo protegido, sem cadastro de senha no navegador. Veja [instalação, permissões e regras](docs/ACTIVE-DIRECTORY.md).
