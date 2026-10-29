@@ -1,4 +1,5 @@
 import importlib.util
+import base64
 import json
 from pathlib import Path
 import tempfile
@@ -11,6 +12,12 @@ spec.loader.exec_module(ad)
 
 
 class WorkerTests(unittest.TestCase):
+    def test_production_query_fits_winrs_command_line_limit(self):
+        script = (Path(__file__).parents[1] / 'worker' / 'ad-events.ps1').read_text(encoding='utf-8')
+        self.assertGreater(len(base64.b64encode(script.encode('utf-16-le'))), 8191)
+        wrapped = ad.powershell_payload(script.replace('__PARAMS__', 'eyJjdXJzb3IiOjB9'))
+        self.assertLess(len(base64.b64encode(wrapped.encode('utf-16-le'))) + 100, 8000)
+
     def test_malformed_json_reports_config_error_without_echoing_secret(self):
         class ConfigPath:
             @staticmethod

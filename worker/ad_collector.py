@@ -1,5 +1,6 @@
 """Read-only AD Security log collector. Secrets and raw WinRM errors are never logged."""
 import base64
+import gzip
 import ipaddress
 import json
 import os
@@ -34,11 +35,21 @@ def configuration(path, controller):
     return value
 
 
+def powershell_payload(script):
+    # WinRS launches through cmd.exe, whose command line is limited to 8191 chars.
+    # Compress the fixed, locally installed query before pywinrm UTF-16/base64 encodes it.
+    packed = base64.b64encode(gzip.compress(script.encode('utf-8'), mtime=0)).decode('ascii')
+    wrapper = "$b=[Convert]::FromBase64String('" + packed + "');$m=New-Object IO.MemoryStream;$m.Write($b,0,$b.Length);$m.Position=0;$g=New-Object IO.Compression.GZipStream -ArgumentList $m,([IO.Compression.CompressionMode]::Decompress);$r=New-Object IO.StreamReader -ArgumentList $g,([Text.Encoding]::UTF8);& ([ScriptBlock]::Create($r.ReadToEnd()))"
+    if len(base64.b64encode(wrapper.encode('utf-16-le'))) + 100 > 8000:
+        raise ValueError('CONFIG_INVALID')
+    return wrapper
+
+
 def query(session, cursor, script):
     if not isinstance(cursor, int) or cursor < 0 or cursor > 9007199254740991:
         raise ValueError('CONFIG_INVALID')
     params = base64.b64encode(json.dumps({'cursor': cursor}).encode()).decode()
-    response = session.run_ps(script.replace('__PARAMS__', params))
+    response = session.run_ps(powershell_payload(script.replace('__PARAMS__', params)))
     if len(response.std_out) > 1500000:
         raise ValueError('INVALID_RESPONSE')
     try:
