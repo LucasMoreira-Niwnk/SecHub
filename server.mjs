@@ -11,6 +11,7 @@ import { createMonitor } from './lib/monitor.mjs';
 import { createDiscovery } from './lib/discovery.mjs';
 import { createZapQueue } from './lib/zap-queue.mjs';
 import { zapPlan } from './lib/zap.mjs';
+import { createCollections } from './lib/collections.mjs';
 import { inventory,decodeScan,relinkHierarchy,withinDomain,MAX_ASSETS } from './lib/inventory.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -31,6 +32,7 @@ relinkHierarchy(db);
 const monitor=createMonitor({db,audit,canRun:()=>dev||configured});
 const discovery=createDiscovery({db,audit});
 const zap=createZapQueue({db,audit,canRun:()=>dev||configured});
+const collections=createCollections({db,audit,canRun:()=>dev||configured});
 const running=monitor.running;
 const json = (res,status,data) => { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(data)); };
 const redirect = (res,path,cookie) => {res.writeHead(302,{Location:path,...(cookie?{'Set-Cookie':cookie}:{})});res.end();};
@@ -44,9 +46,9 @@ const session = req => {
   return row && allowed.includes(row.email) ? row : null;
 };
 const localCSRF = token();
-async function body(req,form=false) {
+async function body(req,form=false,maxSize=form?262144:16384) {
   let size=0, chunks=[];
-  for await (const chunk of req) {size+=chunk.length;if(size>(form?262144:16384)) throw new Error('Requisição muito grande.');chunks.push(chunk);}
+  for await (const chunk of req) {size+=chunk.length;if(size>maxSize) throw new Error('Requisição muito grande.');chunks.push(chunk);}
   if(form) {
     if(!req.headers['content-type']?.startsWith('application/x-www-form-urlencoded')) throw new Error('Requisição SAML deve usar formulário.');
     const params=new URLSearchParams(Buffer.concat(chunks).toString());
@@ -60,7 +62,7 @@ function getOverview() {
   const scans = db.prepare('SELECT scans.*,domains.hostname FROM scans JOIN domains ON domains.id=scans.domain_id ORDER BY started_at DESC LIMIT 100').all().map(decodeScan);
   const latestZap=db.prepare("SELECT * FROM zap_scans WHERE domain_id=? AND mode=? AND status='completed' ORDER BY rowid DESC LIMIT 1");
   for(const d of domains)d.latest_zap=['baseline','sqli'].map(mode=>decodeScan(latestZap.get(d.id,mode))).filter(Boolean);
-  return {domains,scans,zapScans:zap.list(),zap:zap.status(),audit:db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 50').all(),running:[...running],
+  return {domains,scans,zapScans:zap.list(),zap:zap.status(),...collections.overview(),audit:db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 50').all(),running:[...running],
     queued:db.prepare("SELECT domain_id FROM scans WHERE status='queued'").all().map(s=>s.domain_id),
     discoveries:db.prepare('SELECT * FROM discoveries ORDER BY rowid DESC LIMIT 100').all().map(decodeScan)};
 }
@@ -106,11 +108,40 @@ const server = http.createServer(async(req,res)=>{
         return json(res,403,{error:'Login SAML não autorizado.',...diagnostic});
       }
     }
+    if(url.pathname.startsWith('/api/collector/')){
+      const secret=req.headers.authorization?.match(/^Bearer ([A-Za-z0-9_-]{32,200})$/)?.[1];
+      const worker=collections.authenticate(secret);
+      if(!worker)return json(res,401,{error:'Coletor não autorizado.'});
+      if(req.method!=='POST')return json(res,405,{error:'Use POST.'});
+      const data=await body(req,false,url.pathname.endsWith('/result')?4*1024*1024:16384);
+      if(url.pathname==='/api/collector/claim')return json(res,200,collections.claim(worker,data.capabilities));
+      if(url.pathname==='/api/collector/heartbeat')return json(res,200,collections.heartbeat(worker,data));
+      if(url.pathname==='/api/collector/result')return json(res,200,collections.complete(worker,data));
+      return json(res,404,{error:'Operação não encontrada.'});
+    }
     if(url.pathname.startsWith('/api/')) {
       const user = session(req);
       if(!user) return json(res,401,{error:'Faça login com a conta corporativa.'});
       if(req.method!=='GET' && (req.headers.origin!==appURL.origin || req.headers['x-csrf-token']!==user.csrf)) return json(res,403,{error:'Origem ou token de proteção inválido.'});
       if(req.method==='GET' && url.pathname==='/api/overview') return json(res,200,getOverview());
+      if(req.method==='GET'&&url.pathname==='/api/aws/iam-policy'){
+        res.setHeader('Content-Disposition','attachment; filename="sechub-aws-readonly-policy.json"');
+        return json(res,200,JSON.parse(readFileSync(resolve(root,'deploy/aws-readonly-policy.json'),'utf8')));
+      }
+      if(req.method==='POST'&&url.pathname==='/api/collectors')return json(res,201,collections.register({...await body(req),actor:user.email}));
+      if(req.method==='POST'&&url.pathname==='/api/internal/assets')return json(res,201,collections.createInternal(await body(req),user.email));
+      if(req.method==='POST'&&url.pathname==='/api/aws/connections')return json(res,201,collections.createAws(await body(req),user.email));
+      const collectionTarget=url.pathname.match(/^\/api\/(internal\/assets|aws\/connections)\/([a-f0-9-]{36})\/(scan|schedule)$/);
+      if(req.method==='POST'&&collectionTarget){
+        const kind=collectionTarget[1]==='internal/assets'?'internal':'aws';
+        return json(res,collectionTarget[3]==='scan'?202:200,collectionTarget[3]==='scan'?collections.enqueue(kind,collectionTarget[2],user.email):collections.schedule(kind,collectionTarget[2],await body(req),user.email));
+      }
+      const collectionCancel=url.pathname.match(/^\/api\/collection-jobs\/([a-f0-9-]{36})\/cancel$/);
+      const collectionJob=url.pathname.match(/^\/api\/collection-jobs\/([a-f0-9-]{36})$/);
+      if(req.method==='GET'&&collectionJob){const job=collections.job(collectionJob[1]);return json(res,job?200:404,job||{error:'Coleta: trabalho não encontrado.'});}
+      if(req.method==='POST'&&collectionCancel)return json(res,200,collections.cancel(collectionCancel[1],user.email));
+      const collectorRevoke=url.pathname.match(/^\/api\/collectors\/([a-f0-9-]{36})\/revoke$/);
+      if(req.method==='POST'&&collectorRevoke)return json(res,200,collections.revoke(collectorRevoke[1],user.email));
       const zapReview=url.pathname.match(/^\/api\/zap\/([a-f0-9-]{36})\/review$/);
       if(req.method==='POST'&&zapReview)return json(res,200,zap.review(zapReview[1],await body(req),user.email));
       const zapCancel=url.pathname.match(/^\/api\/zap\/([a-f0-9-]{36})\/cancel$/);
@@ -177,7 +208,7 @@ const server = http.createServer(async(req,res)=>{
     json(res,404,{error:'Página não encontrada.'});
   } catch(e) {
     const message=String(e.message);
-    const expected=/Domínio|Informe|Intervalo|JSON|Requisição|Agendamento|^ZAP:/.test(message);
+    const expected=/Domínio|Informe|Intervalo|JSON|Requisição|Agendamento|^ZAP:|^Coleta:/.test(message);
     json(res,expected?400:500,{error:expected?message:'Não foi possível concluir a operação. Confira a configuração e tente novamente.'});
   }
 });
@@ -185,6 +216,7 @@ server.requestTimeout=15000;
 server.headersTimeout=10000;
 server.maxHeadersCount=50;
 const scheduler=setInterval(()=>{
+  collections.tick();
   if(!dev && !configured) return;
   for(const asset of db.prepare('SELECT * FROM domains WHERE enabled=1 AND (next_run IS NULL OR next_run<=?)').all(new Date().toISOString())) {
     monitor.enqueue([asset],'scheduler');

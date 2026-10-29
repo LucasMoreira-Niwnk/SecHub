@@ -1,6 +1,6 @@
 # Casa & Terra · SecHUB
 
-Versão 0.3: ZAP integrado ao monitoramento do monitoramento de domínios empresariais. Node.js 24+, SQLite local e interface em português. Autenticação SAML com @node-saml/node-saml; instale as dependências com npm ci.
+Versão 0.4: monitoramento público e interno, ZAP e coleta AWS de leitura. Node.js 24+, SQLite local e interface em português. Autenticação SAML com @node-saml/node-saml; instale as dependências com npm ci.
 
 ## Iniciar
 
@@ -68,14 +68,15 @@ O worker usa contêiner descartável, rede dedicada, IP público fixado e firewa
 
 Não implementa abuso de autenticação, brute force, testes autenticados, POST/JSON/XML, outras políticas ativas ou coletores privados. Veja [docs/ZAP.md](docs/ZAP.md) para instalação, operação, limites e rollback.
 
-## Expansão AWS e DNS interno
+## Domínios internos e AWS
 
-Não há integração AWS ou coletor privado ativo. Contrato proposto:
+A versão 0.4 inclui as abas **Domínios internos**, **AWS** e **Coletores**. O coletor corporativo/VPC é um serviço separado, com token próprio, política local de sufixos/CIDRs/DNS, fila persistente, leases, cancelamento, agendas pausadas e resultados por execução.
 
-- Coletores separados por zona de confiança (internet, rede corporativa, VPC), registro de identidade e envio autenticado das evidências.
-- Inventário com `collector_id`, zona, resolvedores e escopo; permitir IPs privados apenas no worker interno e dentro dos CIDRs autorizados, preservando bloqueio de metadata e serviços de administração.
-- AWS via IAM Role/STS de leitura, sem chaves estáticas: Security Hub CSPM (AWS FSBP/CIS), GuardDuty, Inspector e Route 53/Resolver. Configurar contas/regiões explícitas.
-- API de ingestão autenticada, esquema versionado, fila durável, RBAC por equipe, alertas, retenção e trilha de auditoria em armazenamento externo antes de operação em escala.
+O escopo interno autorizado é `casaeterra.com`, CIDR `10.4.0.0/24`, DNS `10.4.0.6`. O worker interno avalia DNS A/AAAA e HTTPS/TLS na porta 443, fixando o IP validado e bloqueando respostas fora do escopo, DNS misto, metadata, o próprio coletor e os servidores DNS. Não realiza descoberta de rede ou ZAP ativo interno. O scanner público e o worker ZAP público mantêm seus bloqueios a IPs privados.
+
+AWS é configurada posteriormente pelo painel, com Account ID numérico, Role ARN, perfil de origem e regiões explícitas (`us-east-1` e `sa-east-1` por padrão). A coleta usa IAM Role/STS e AWS CLI v2 em modo somente leitura: Security Hub, GuardDuty, Inspector, zonas Route 53 e endpoints Resolver. Não recebe access keys pelo painel, não altera recursos AWS e não habilita serviços pagos. Resultados com falhas de permissão, serviço não habilitado ou limites são apresentados como parciais.
+
+Veja [docs/COLETORES-AWS.md](docs/COLETORES-AWS.md) para instalação, bootstrap de SSO/IAM, configuração posterior e rollback.
 
 ## Implantação
 
