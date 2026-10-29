@@ -54,3 +54,11 @@ sudo journalctl -u sechub-ad -n 30 --no-pager
 `credentials_pending`: conta não preenchida ou coleta pausada; `AUTH_FAILED`: corrigir conta/senha e salvar arquivo; `ACCESS_DENIED`: delegar leitura/WinRM; `WINRM_UNAVAILABLE`: verificar rede/listener; `EVENT_QUERY_FAILED`: política/compatibilidade de consulta. Serviço online significa que o coletor comunica com SecHub; última coleta bem-sucedida indica leitura do Windows. Sem credenciais válidas, não se declara a coleta real validada.
 
 Fontes: [Microsoft — WinRM e segurança](https://learn.microsoft.com/en-us/powershell/scripting/security/remoting/winrm-security), [Get-WinEvent](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.diagnostics/get-winevent), [pywinrm — criptografia de mensagens](https://github.com/diyan/pywinrm).
+
+## Dashboard da visão geral
+
+A visão geral agrega todos os eventos retidos no período, sem o limite de cem registros da lista de eventos recentes. Filtre hoje, sete, quinze ou trinta dias, ou informe um intervalo personalizado dentro dos últimos trinta dias. Os dias usam America/Sao_Paulo, com início à meia-noite e término exclusivo à meia-noite do dia seguinte. Usuários são o filtro inicial; máquinas (contas terminadas em $) e todas as contas estão disponíveis. Contas de sistema conhecidas e anônimas não entram no filtro de usuários.
+
+Os rankings de sucesso/falha contam eventos, não sessões únicas: logons, TGTs, tickets de serviço e validações NTLM podem produzir múltiplos registros de uma sessão. O dashboard mostra a distribuição por Event ID e o número de eventos 4624 separadamente. Alertas são filtrados pelo período, incluindo todos os tipos de conta, e divididos por comportamento e revisão. Retenção e interrupções da coleta podem deixar dias sem dados.
+
+Os cartões de domínios, rede interna e AWS representam inventário/configuração atuais; as contagens de execuções desses módulos e do ZAP respeitam o período. Estado dos workers e última leitura são atuais. Os agregados só estão acessíveis pela sessão autenticada existente, em /api/dashboard e /api/overview.

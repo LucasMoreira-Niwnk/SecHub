@@ -13,6 +13,7 @@ import { createZapQueue } from './lib/zap-queue.mjs';
 import { zapPlan } from './lib/zap.mjs';
 import { createCollections } from './lib/collections.mjs';
 import { createAd } from './lib/ad.mjs';
+import { createDashboard } from './lib/dashboard.mjs';
 import { inventory,decodeScan,relinkHierarchy,withinDomain,MAX_ASSETS } from './lib/inventory.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -35,6 +36,7 @@ const discovery=createDiscovery({db,audit});
 const zap=createZapQueue({db,audit,canRun:()=>dev||configured});
 const collections=createCollections({db,audit,canRun:()=>dev||configured});
 const ad=createAd({db,audit});
+const dashboard=createDashboard(db);
 const running=monitor.running;
 const json = (res,status,data) => { res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'}); res.end(JSON.stringify(data)); };
 const redirect = (res,path,cookie) => {res.writeHead(302,{Location:path,...(cookie?{'Set-Cookie':cookie}:{})});res.end();};
@@ -59,12 +61,12 @@ async function body(req,form=false,maxSize=form?262144:16384) {
   }
   try {return JSON.parse(Buffer.concat(chunks).toString()||'{}');} catch {throw new Error('JSON inválido.');}
 }
-function getOverview() {
+function getOverview(params) {
   const domains = inventory(db);
   const scans = db.prepare('SELECT scans.*,domains.hostname FROM scans JOIN domains ON domains.id=scans.domain_id ORDER BY started_at DESC LIMIT 100').all().map(decodeScan);
   const latestZap=db.prepare("SELECT * FROM zap_scans WHERE domain_id=? AND mode=? AND status='completed' ORDER BY rowid DESC LIMIT 1");
   for(const d of domains)d.latest_zap=['baseline','sqli'].map(mode=>decodeScan(latestZap.get(d.id,mode))).filter(Boolean);
-  return {domains,scans,zapScans:zap.list(),zap:zap.status(),...collections.overview(),ad:ad.overview(),audit:db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 50').all(),running:[...running],
+  return {domains,scans,zapScans:zap.list(),zap:zap.status(),...collections.overview(),ad:ad.overview(),dashboard:dashboard.build(params),audit:db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT 50').all(),running:[...running],
     queued:db.prepare("SELECT domain_id FROM scans WHERE status='queued'").all().map(s=>s.domain_id),
     discoveries:db.prepare('SELECT * FROM discoveries ORDER BY rowid DESC LIMIT 100').all().map(decodeScan)};
 }
@@ -131,7 +133,8 @@ const server = http.createServer(async(req,res)=>{
       const user = session(req);
       if(!user) return json(res,401,{error:'Faça login com a conta corporativa.'});
       if(req.method!=='GET' && (req.headers.origin!==appURL.origin || req.headers['x-csrf-token']!==user.csrf)) return json(res,403,{error:'Origem ou token de proteção inválido.'});
-      if(req.method==='GET' && url.pathname==='/api/overview') return json(res,200,getOverview());
+      if(req.method==='GET' && url.pathname==='/api/overview') return json(res,200,getOverview(url.searchParams));
+      if(req.method==='GET' && url.pathname==='/api/dashboard') return json(res,200,dashboard.build(url.searchParams));
       if(req.method==='POST'&&url.pathname==='/api/ad/rules')return json(res,200,ad.configure(await body(req),user.email));
       const adAlert=url.pathname.match(/^\/api\/ad\/alerts\/([a-f0-9]{64})(\/review)?$/);
       if(adAlert&&req.method==='GET'&&!adAlert[2]){const result=ad.alert(adAlert[1]);return json(res,result?200:404,result||{error:'AD: alerta não encontrado.'});}
@@ -220,7 +223,7 @@ const server = http.createServer(async(req,res)=>{
     json(res,404,{error:'Página não encontrada.'});
   } catch(e) {
     const message=String(e.message);
-    const expected=/Domínio|Informe|Intervalo|JSON|Requisição|Agendamento|^ZAP:|^Coleta:|^AD:/.test(message);
+    const expected=/Domínio|Informe|Intervalo|JSON|Requisição|Agendamento|^ZAP:|^Coleta:|^AD:|^Dashboard:/.test(message);
     json(res,expected?400:500,{error:expected?message:'Não foi possível concluir a operação. Confira a configuração e tente novamente.'});
   }
 });
