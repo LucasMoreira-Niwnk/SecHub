@@ -20,6 +20,7 @@ test('produção: API bloqueada sem SAML, metadados públicos e Host validado',a
   const server=await start(3197,false);
   try{
     assert.equal((await fetch(server.origin+'/api/overview')).status,401);
+    assert.equal((await fetch(server.origin+'/api/dashboard?days=7')).status,401);
     assert.equal((await fetch(server.origin+'/api/ad/ingest',{method:'POST'})).status,401);
     assert.equal((await fetch(server.origin+'/api/aws/iam-policy')).status,401);
     assert.equal((await fetch(server.origin+'/api/collector/claim',{method:'POST'})).status,401);
@@ -55,6 +56,10 @@ test('AD API: token exclusivo de ingestão, CSRF em regras, alerta e revisão po
     assert.equal((await post('/api/collector/claim',{capabilities:{}},worker)).status,401);
     const overview=await(await fetch(server.origin+'/api/overview')).json();
     assert.equal(overview.ad.counts.events,3);assert.equal(overview.ad.alerts.length,1);assert.ok(!JSON.stringify(overview).includes(registration.token));
+    const dashboardResponse=await fetch(server.origin+'/api/dashboard?days=1&accounts=users');
+    assert.equal(dashboardResponse.status,200);const dashboard=await dashboardResponse.json();assert.equal(dashboard.ad.totals.failures,3);assert.equal(dashboard.ad.topFailures[0].account,'corp\\tester');assert.equal(dashboard.range.days,1);
+    assert.equal((await fetch(server.origin+'/api/dashboard?days=31')).status,400);
+    assert.equal((await fetch(server.origin+'/api/overview?accounts=invalid')).status,400);
     const id=overview.ad.alerts[0].id;
     const alert=await(await fetch(server.origin+'/api/ad/alerts/'+id)).json();assert.equal(alert.evidence.length,3);
     assert.equal((await post('/api/ad/alerts/'+id+'/review',{status:'confirmed',reason:'Validated in test'})).status,200);
