@@ -17,6 +17,8 @@ test('produção: API bloqueada sem SAML, metadados públicos e Host validado',a
   const server=await start(3197,false);
   try{
     assert.equal((await fetch(server.origin+'/api/overview')).status,401);
+    assert.equal((await fetch(server.origin+'/api/aws/iam-policy')).status,401);
+    assert.equal((await fetch(server.origin+'/api/collector/claim',{method:'POST'})).status,401);
     assert.equal((await fetch(server.origin+'/auth/saml/login')).status,503);
     assert.equal((await fetch(server.origin+'/auth/saml/acs',{method:'POST'})).status,503);
     assert.equal((await fetch(server.origin+'/auth/google')).status,404);
@@ -87,5 +89,31 @@ test('modo local: CSRF, cadastro, duplicatas, agenda e exportação',async()=>{
     assert.equal((await post(`/api/domains/${domain.id}/zap`,{mode:'baseline'})).status,403);
     assert.equal((await post(`/api/domains/${domain.id}/zap`,{mode:'baseline'},headers)).status,400);
     assert.equal(after.zap.enabled,false);
+  }finally{await server.stop();}
+});
+test('API de coleta: registro protegido, claim/lease isolado, resultado autenticado e IAM preparado',async()=>{
+  const server=await start(3201,true);
+  try{
+    const auth=await(await fetch(server.origin+'/api/session')).json();
+    const headers={'Content-Type':'application/json',Origin:server.origin,'X-CSRF-Token':auth.user.csrf};
+    const post=(path,value,custom=headers)=>fetch(server.origin+path,{method:'POST',headers:custom,body:JSON.stringify(value)});
+    assert.equal((await post('/api/collectors',{name:'Fixture',zone:'corporate'},{})).status,403);
+    const registration=await(await post('/api/collectors',{name:'Fixture',zone:'corporate'})).json();
+    const worker={'Content-Type':'application/json',Authorization:'Bearer '+registration.token};
+    const capabilities={internal:{suffixes:['casaeterra.com'],cidrs:['10.4.0.0/24'],dnsServers:['10.4.0.6']},aws:{roleArns:[],sourceProfiles:['sechub-source'],regions:['us-east-1','sa-east-1']}};
+    assert.equal((await post('/api/collector/claim',{capabilities},worker)).status,200);
+    const added=await post('/api/internal/assets',{collectorId:registration.id,hostname:'app.casaeterra.com'});assert.equal(added.status,201);const {id}=await added.json();
+    const enqueued=await post(`/api/internal/assets/${id}/scan`,{});assert.equal(enqueued.status,202);
+    const {job}=await(await post('/api/collector/claim',{capabilities},worker)).json();
+    assert.ok(job.lease);assert.equal(job.kind,'internal');
+    const overview=await(await fetch(server.origin+'/api/overview')).json();assert.ok(!JSON.stringify(overview).includes(registration.token));assert.ok(!JSON.stringify(overview).includes(job.lease));
+    assert.equal((await post('/api/collector/result',{id:job.id,lease:'wrong',status:'completed'},worker)).status,400);
+    assert.equal((await post('/api/collector/result',{id:job.id,lease:job.lease,status:'completed',result:{dns:{a:{records:['10.4.0.20']},aaaa:{records:[]}},web:{status:200},findings:[{code:'fixture',severity:'info',title:'Internal fixture'}]}},worker)).status,200);
+    const result=await(await fetch(server.origin+'/api/collection-jobs/'+job.id)).json();assert.equal(result.result.findings[0].title,'Internal fixture');assert.equal(result.lease_hash,undefined);
+    const aws=await post('/api/aws/connections',{collectorId:registration.id,name:'AWS fixture',accountId:'123456789012',roleArn:'arn:aws:iam::123456789012:role/ReadOnly',sourceProfile:'sechub-source',regions:['us-east-1','sa-east-1']});assert.equal(aws.status,201);
+    const connection=await aws.json();assert.equal((await post(`/api/aws/connections/${connection.id}/scan`,{})).status,400);
+    const policy=await(await fetch(server.origin+'/api/aws/iam-policy')).json();assert.ok(policy.Statement[0].Action.every(a=>/:(?:List|Get)/.test(a)));
+    assert.equal((await post('/api/collectors/'+registration.id+'/revoke',{})).status,200);
+    assert.equal((await post('/api/collector/claim',{capabilities},worker)).status,401);
   }finally{await server.stop();}
 });

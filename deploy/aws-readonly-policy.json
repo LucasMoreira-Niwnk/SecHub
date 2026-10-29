@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "SecHubSecurityAndDnsReadOnly",
+    "Effect": "Allow",
+    "Action": [
+      "sts:GetCallerIdentity",
+      "securityhub:GetFindings",
+      "guardduty:ListDetectors",
+      "guardduty:ListFindings",
+      "guardduty:GetFindings",
+      "inspector2:ListFindings",
+      "route53:ListHostedZones",
+      "route53resolver:ListResolverEndpoints"
+    ],
+    "Resource": "*"
+  }]
+}

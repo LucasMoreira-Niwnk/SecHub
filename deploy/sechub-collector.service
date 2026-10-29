@@ -1,0 +1,36 @@
+[Unit]
+Description=SecHUB corporate and AWS read-only collector
+Wants=network-online.target
+After=network-online.target sechub.service
+
+[Service]
+Type=simple
+User=sechub-collector
+Group=sechub-collector
+WorkingDirectory=/usr/local/lib/sechub-collector
+EnvironmentFile=/etc/sechub-collector.env
+Environment=HOME=/var/lib/sechub-collector
+Environment=AWS_CONFIG_FILE=/var/lib/sechub-collector/.aws/config
+Environment=AWS_SHARED_CREDENTIALS_FILE=/var/lib/sechub-collector/.aws/credentials
+ExecStart=/opt/node24/bin/node /usr/local/lib/sechub-collector/worker/collector.mjs
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+StateDirectory=sechub-collector
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
